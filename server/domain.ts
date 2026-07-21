@@ -1099,7 +1099,7 @@ export class AttentionDomain {
       input.cardRef.feedId,
       { kind: "card", feedId: input.cardRef.feedId, cardId: input.cardRef.cardId },
       input.instruction,
-      { ...(input.assignee ? { assignee: input.assignee } : {}) },
+      input.assignee ? { assignee: input.assignee } : {},
     );
   }
 

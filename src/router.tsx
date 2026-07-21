@@ -2,14 +2,19 @@ import { Navigate, createRootRoute, createRoute, createRouter, useParams } from 
 import App from "./App";
 import type { AttentionScreen, WorkspaceTab } from "./app/types";
 import { OnYourMindPage } from "./mind/OnYourMindPage";
+import { ControlPlaneApp } from "./workspace/ControlPlaneApp";
 
 const rootRoute = createRootRoute();
 
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: () => <Navigate to="/feed/$feedId" params={{ feedId: "inbox" }} replace />,
+  component: () => <Navigate to="/now" replace />,
 });
+
+const nowRoute = createRoute({ getParentRoute: () => rootRoute, path: "/now", component: () => <ControlPlaneApp surface="now" /> });
+const coverageRoute = createRoute({ getParentRoute: () => rootRoute, path: "/coverage", component: () => <ControlPlaneApp surface="coverage" /> });
+const priorityLedgerRoute = createRoute({ getParentRoute: () => rootRoute, path: "/priority-ledger", component: () => <ControlPlaneApp surface="ledger" /> });
 
 const feedRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -54,6 +59,9 @@ function RouteApp({ screen, workspaceTab }: { screen: AttentionScreen; workspace
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  nowRoute,
+  coverageRoute,
+  priorityLedgerRoute,
   mindRoute,
   historicalMindRoute,
   feedRoute,

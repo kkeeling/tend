@@ -7,6 +7,7 @@ export function TopBar({
   title = state.active.config.name,
   destination = "feed",
   onMind,
+  onNow,
   onFeed,
   onInspector,
   onWorkspace,
@@ -15,6 +16,7 @@ export function TopBar({
   title?: string;
   destination?: "feed" | "mind";
   onMind: () => void;
+  onNow?: () => void;
   onFeed: (id: string) => void;
   onInspector?: (value: Inspector) => void;
   onWorkspace?: (tab?: WorkspaceTab) => void;
@@ -43,6 +45,7 @@ export function TopBar({
       )}
       {open && (
         <div className="feed-menu">
+          {onNow && <button onClick={() => { onNow(); setOpen(false); }}><span>Now</span><small>Everything that needs attention across feeds</small></button>}
           <button className={destination === "mind" ? "selected" : ""} onClick={() => { onMind(); setOpen(false); }}>
             <span>On Your Mind</span><small>Current signals and their source observations</small>
           </button>

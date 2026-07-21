@@ -275,6 +275,7 @@ export function CardView({
   onAction,
   onReturnToReview,
   queuedFor,
+  domId = card.id,
 }: {
   card: Card;
   queuedNote?: WorkItemView;
@@ -284,13 +285,14 @@ export function CardView({
   onAction: (action: CardAction) => void;
   onReturnToReview: () => void;
   queuedFor?: string;
+  domId?: string;
 }) {
   const actions = visibleCardActions(card);
   const nextThing = card.proposedAction?.label === "Decide disposition"
     ? "Dismiss, or tell Codex what to do"
     : card.proposedAction?.label ?? actions.find((action) => action.variant === "primary")?.label ?? actions[0]?.label;
   return (
-    <article className={`attention-card ${card.contextInfluence ? "has-context-influence" : ""} ${active ? "is-active" : ""}`} data-card-id={card.id} onClick={onActivate} onMouseEnter={onActivate}>
+    <article className={`attention-card ${card.contextInfluence ? "has-context-influence" : ""} ${active ? "is-active" : ""}`} data-card-id={domId} onClick={onActivate} onMouseEnter={onActivate}>
       <div className="card-rule" />
       <header className="card-head">
         <span className={`kind-dot ${card.kind === "feed_improvement" ? "proposal" : ""}`} />
