@@ -13,6 +13,7 @@ const card: Card = {
   title: "Reply to the contract thread",
   eyebrow: "Mailbox work A",
   why: "A reply is due today.",
+  sourceMailbox: "mailbox-work-a",
   blocks: [{ id: "draft", type: "editable_text", label: "Suggested reply", value: "Thanks — I’ll review this today.", editable: true }],
   actions: [{ id: "send", label: "Send reply", behavior: "approve_action", instruction: "Send the exact reply.", artifactBlockId: "draft", externalMutation: true, mailboxPolicy: "reply_from_source", variant: "primary" }],
   readyForPass: 1,
@@ -72,6 +73,7 @@ test("Now renders the existing editable card and exact CTA with composite identi
   expect(html).toContain('data-card-id="mailbox-work-a:reply-card"');
   expect(html).toContain("Suggested reply");
   expect(html).toContain("Send reply");
+  expect(html).toContain("Connector host identity checked before action");
   expect(html).toContain("Due today and high consequence.");
 });
 

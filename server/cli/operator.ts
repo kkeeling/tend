@@ -18,7 +18,7 @@ import {
   importLegacyInboxCard,
 } from "./legacyImports";
 import { assertCliRuntimeMatchesLive } from "./runtimeGuard";
-import type { CommitmentLifecycle } from "../../shared/types";
+import type { CommitmentLifecycle, SourceAttemptOutcome } from "../../shared/types";
 
 export async function runOperatorCli(rawArgs: string[]): Promise<void> {
   const root = resolveAppRoot();
@@ -151,6 +151,13 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
         await domain.removeSource(required("feed"), required("source"));
         output = { ok: true };
         break;
+      case "source:profile:set":
+        output = await domain.configureSourceProfile(
+          required("feed"),
+          required("source"),
+          await structured("profile"),
+        );
+        break;
       case "source:record-run":
         output = await domain.recordSourceRun(
           required("feed"),
@@ -162,6 +169,29 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
           value("context-use") || value("context-use-file")
             ? await structured("context-use")
             : undefined,
+          value("collection-proof") || value("collection-proof-file")
+            ? await structured("collection-proof")
+            : undefined,
+        );
+        break;
+      case "source:attempt:record":
+        output = await domain.recordSourceAttempt(
+          required("feed"),
+          required("source"),
+          {
+            outcome: required("outcome") as Exclude<SourceAttemptOutcome, "success" | "no_change">,
+            ...(value("observed-identity") || value("observed-identity-file")
+              ? { observedIdentity: await structured("observed-identity") }
+              : {}),
+            ...(value("started-at") ? { startedAt: value("started-at") } : {}),
+            ...(value("work") ? { triggerWorkId: value("work") } : {}),
+            ...(value("error-class") || value("error") ? {
+              error: {
+                class: value("error-class") ?? "connector_error",
+                message: value("error") ?? required("outcome"),
+              },
+            } : {}),
+          },
         );
         break;
       case "commitment:candidate:record":
@@ -366,7 +396,9 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
           required("feed"),
           required("work"),
           required("token"),
-          value("mailbox"),
+          value("identity") || value("identity-file")
+            ? await structured("identity")
+            : value("mailbox"),
         );
         break;
       case "work:fail":

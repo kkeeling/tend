@@ -32,3 +32,10 @@
   happened in the current turn.
 - Never perform an external mutation without the app's exact visible approval and a fresh
   `action:verify`.
+- Verify the connector profile named by the claimed `executionGrant` immediately before mutation.
+  Pass its nonce and the fresh provider-neutral observation to `action:verify --identity`. The
+  `agent_host_observed` assurance level names the trusted agent/connector host boundary; it is not
+  cryptographic attestation. A `prepare_only` grant prohibits mutation.
+- Before every collection, require an exact connector-profile match. Record a source attempt on
+  every exit, never advance a checkpoint on failure or partial collection, and never use browser
+  login or browser automation as an authentication fallback.

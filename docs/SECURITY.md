@@ -6,8 +6,17 @@ Tend is local-first and binds its development server to `127.0.0.1` by default.
 
 - The local Tend app stores workflow state and evidence.
 - Codex Desktop performs connector access.
-- Gmail, GitHub, Slack, browser, and other connector credentials are not stored by Tend.
-- External mutations require approved work and immediate `verify_action` checks.
+- Gmail, Outlook, calendar, Slack, Teams, Granola, browser, and other connector credentials are not
+  stored by Tend. Granola API credentials, when needed, belong in a connector runtime or macOS
+  Keychain and never in Tend state, CLI arguments, logs, or backups.
+- External mutations require approved work and immediate `action:verify` checks. Provider-neutral
+  execution grants bind the operation to an expected identity and fresh nonce. The
+  `agent_host_observed` level explicitly trusts the agent/connector host and is not cryptographic
+  authentication; `trusted_adapter` requires a valid nonce-bound adapter receipt; `prepare_only`
+  prohibits mutation.
+- Source collection is read authority only. Every configured attempt records an outcome, failed or
+  partial attempts preserve the last-good checkpoint, and browser authentication fallback is
+  prohibited.
 
 ## Localhost
 

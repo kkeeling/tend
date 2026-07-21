@@ -9,6 +9,10 @@ import type {
   CommitmentCandidate,
   CommitmentCandidateInput,
   CommitmentLifecycle,
+  ConnectorExecutionGrant,
+  ConnectorExecutionRequirement,
+  ConnectorVerificationObservation,
+  ConnectorVerificationReceipt,
   FeedConfig,
   FeedMindContext,
   FeedView,
@@ -34,6 +38,7 @@ import type {
   SourceAttemptOutcome,
   SourceCollectionProof,
   SourceIdentity,
+  SourceProfile,
   SourceRecipe,
   SourceRunContextUse,
   SweepFeedbackTrace,
@@ -62,13 +67,17 @@ import { queuedWork } from "./workflow/workItems";
 import { mobileActionConfirmation, projectMobileCard, projectMobileRoutineAction } from "./mobile/projection";
 import { assertCommitmentTransition } from "./workflow/commitments";
 import { evaluatePriorityRows } from "./workflow/priority";
+import {
+  executionRequirementDigest,
+  issueExecutionGrant,
+  normalizeIdentity,
+  requirementFromPolicy,
+  sourceIdentityMatches,
+  verifyConnectorObservation,
+} from "./workflow/connectors";
 
 function appendHistory(card: Card, type: string, detail?: string): void {
   card.history.push({ at: isoNow(), type, detail });
-}
-
-function sourceIdentityMatches(expected: SourceIdentity, observed: SourceIdentity): boolean {
-  return Object.entries(expected).every(([key, value]) => value === undefined || observed[key as keyof SourceIdentity] === value);
 }
 
 type WorkCaller =
@@ -354,6 +363,9 @@ function validateCardActions(actions: CardAction[] | undefined): void {
     if (!action.id?.trim()) throw new Error("Card action ids must be non-empty strings.");
     if (isReservedCardActionId(action.id)) throw new Error(`Card action id "${action.id}" is reserved by Tend.`);
     if (ids.has(action.id)) throw new Error(`Card action id "${action.id}" must be unique within a card.`);
+    if (action.execution && (action.behavior !== "approve_action" || action.externalMutation !== true)) {
+      throw new Error("A connector execution policy is valid only on an exact externally mutating approval action.");
+    }
     ids.add(action.id);
   }
 }
@@ -731,6 +743,8 @@ export class AttentionDomain {
     work.verifiedAt = undefined;
     work.verifiedApprovalDigest = undefined;
     work.verifiedMailbox = undefined;
+    work.connectorVerification = undefined;
+    if (work.executionGrant) work.executionGrant = issueExecutionGrant(work.executionGrant);
   }
 
   async registerAgentPresence(
@@ -1038,6 +1052,103 @@ export class AttentionDomain {
   private async assertCardSourceCurrent(card: Card): Promise<void> {
     if (!card.sourceRunIds?.length) return;
     await this.assertSourceRunIdsCurrent(card.feedId, card.sourceRunIds, card.id);
+  }
+
+  private async sourceProfileForCard(
+    card: Card,
+    requestedSourceId?: string,
+  ): Promise<{ sourceId: string; profile: SourceProfile } | undefined> {
+    const feed = await this.store.readFeed(card.feedId);
+    if (requestedSourceId) {
+      const source = feed.sources.find((item) => item.id === requestedSourceId);
+      if (!source?.profile) throw new Error(`Execution source profile not found: ${requestedSourceId}`);
+      return { sourceId: source.id, profile: source.profile };
+    }
+    for (const runId of [...(card.sourceRunIds ?? [])].reverse()) {
+      const run = await this.store.readRun(card.feedId, runId);
+      const source = feed.sources.find((item) => item.id === run.sourceId);
+      if (source?.profile) return { sourceId: source.id, profile: source.profile };
+    }
+    const mailbox = card.sourceMailbox?.trim().toLowerCase();
+    if (!mailbox) return undefined;
+    const source = feed.sources.find((item) => item.profile?.expectedIdentity.account?.trim().toLowerCase() === mailbox);
+    return source?.profile ? { sourceId: source.id, profile: source.profile } : undefined;
+  }
+
+  private async executionRequirementForCard(
+    card: Card,
+    action: ProposedAction,
+  ): Promise<ConnectorExecutionRequirement | undefined> {
+    const source = await this.sourceProfileForCard(card, action.execution?.sourceId);
+    if (action.execution) {
+      return requirementFromPolicy(
+        {
+          ...action.execution,
+          ...(action.execution.sourceId ? {} : source ? { sourceId: source.sourceId } : {}),
+        },
+        source?.profile,
+      );
+    }
+    const sourceMailbox = requiredSourceMailbox(card.feedId, card, action);
+    if (!sourceMailbox) return undefined;
+    const provider = source?.profile.provider === "outlook_email" ? "outlook_email" : "gmail";
+    return requirementFromPolicy({
+      provider,
+      operation: "send_reply",
+      ...(source ? { sourceId: source.sourceId } : {}),
+      expectedIdentity: {
+        ...source?.profile.expectedIdentity,
+        account: sourceMailbox,
+      },
+    }, source?.profile);
+  }
+
+  private async executionRequirementForAction(
+    feedId: string,
+    action: ProposedAction,
+  ): Promise<ConnectorExecutionRequirement | undefined> {
+    if (!action.execution) return undefined;
+    const source = action.execution.sourceId
+      ? (await this.store.readFeed(feedId)).sources.find((item) => item.id === action.execution!.sourceId)
+      : undefined;
+    if (action.execution.sourceId && !source?.profile) {
+      throw new Error(`Execution source profile not found: ${action.execution.sourceId}`);
+    }
+    return requirementFromPolicy(action.execution, source?.profile);
+  }
+
+  private async assertActionCanBeOffered(feedId: string, action: ProposedAction): Promise<void> {
+    if (action.execution && action.externalMutation !== true) {
+      throw new Error("A connector execution policy requires externalMutation: true.");
+    }
+    const requirement = await this.executionRequirementForAction(feedId, action);
+    if (requirement?.minimumAssurance === "prepare_only") {
+      throw new Error(`${requirement.provider} is read-only or lacks the configured ${requirement.operation} capability; offer preparation instead of an outbound CTA.`);
+    }
+  }
+
+  private async assertExecutionGrantCurrent(
+    card: Card,
+    action: ProposedAction,
+    grant: ConnectorExecutionGrant | undefined,
+  ): Promise<void> {
+    const current = await this.executionRequirementForCard(card, action);
+    if (!current && !grant) return;
+    if (!current || !grant || executionRequirementDigest(current) !== executionRequirementDigest(grant)) {
+      throw new Error("Approval stale - the connector execution identity or capability changed after approval.");
+    }
+  }
+
+  private assertConnectorVerificationCurrent(work: WorkItem): void {
+    if (!work.executionGrant) return;
+    const receipt = work.connectorVerification;
+    if (
+      !receipt
+      || receipt.nonce !== work.executionGrant.nonce
+      || receipt.grantDigest !== executionRequirementDigest(work.executionGrant)
+    ) {
+      throw new Error("Approved action must pass connector identity verification for the current execution grant immediately before mutation.");
+    }
   }
 
   private async quarantineLegacyMutationWork(feed: FeedView, work: WorkItem): Promise<boolean> {
@@ -1423,6 +1534,7 @@ export class AttentionDomain {
     await this.assertCardSourceCurrent(card);
     const action = configuredApprovalAction(card, cardActionId);
     requiredSourceMailbox(feedId, card, action);
+    const executionRequirement = await this.executionRequirementForCard(card, action);
     const approvalDigest = actionDigest(card, cardActionId);
     const feed = await this.store.readFeed(feedId);
     const active = (await this.store.readWorkItems(feedId)).filter((work) =>
@@ -1460,6 +1572,7 @@ export class AttentionDomain {
       kind: "execute_approved_action",
       approvalDigest,
       completionCleanup: feed.config.defaultCleanup,
+      ...(executionRequirement ? { executionGrant: issueExecutionGrant(executionRequirement) } : {}),
       ...(cardActionId ? { cardActionId } : {}),
       ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
     });
@@ -1633,6 +1746,7 @@ export class AttentionDomain {
   async upsertRoutineActionGroup(feedId: string, input: Pick<RoutineActionGroup, "id" | "label" | "summary" | "proposedAction" | "items">): Promise<RoutineActionGroup> {
     if (!input.id.trim() || !input.label.trim() || !input.summary.trim()) throw new Error("Routine action group id, label, and summary are required.");
     if (!input.proposedAction.label.trim() || !input.proposedAction.instruction.trim()) throw new Error("Routine action group approval needs a visible label and exact instruction.");
+    await this.assertActionCanBeOffered(feedId, input.proposedAction);
     if (!input.items.length) throw new Error("Routine action group needs at least one item.");
     const itemIds = input.items.map((item) => item.id);
     const cardIds = input.items.flatMap((item) => item.cardId ? [item.cardId] : []);
@@ -1695,6 +1809,7 @@ export class AttentionDomain {
   ): Promise<WorkItem> {
     const group = await this.store.readRoutineActionGroup(feedId, groupId);
     const approvalDigest = routineActionDigest(group);
+    const executionRequirement = await this.executionRequirementForAction(feedId, group.proposedAction);
     const active = (await this.store.readWorkItems(feedId)).filter((work) =>
       work.kind === "routine_action_batch"
       && work.routineActionGroupId === groupId
@@ -1721,6 +1836,7 @@ export class AttentionDomain {
       kind: "routine_action_batch",
       routineActionGroupId: group.id,
       approvalDigest,
+      ...(executionRequirement ? { executionGrant: issueExecutionGrant(executionRequirement) } : {}),
       ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
     });
     group.status = "queued";
@@ -2218,6 +2334,7 @@ export class AttentionDomain {
         if (work.verifiedApprovalDigest !== work.approvalDigest) {
           throw new Error("Approved action must pass action:verify immediately before the external mutation.");
         }
+        this.assertConnectorVerificationCurrent(work);
         for (const item of group.items) {
           if (!item.cardId) continue;
           const card = await this.store.readCard(feedId, item.cardId);
@@ -2233,6 +2350,7 @@ export class AttentionDomain {
         await this.store.writeRoutineActionGroup(group);
       } else if (work.cardId !== "__feed__") {
         const card = await this.store.readCard(feedId, work.cardId);
+        if (work.approvalDigest) await this.assertCardSourceCurrent(card);
         const currentApprovalDigest = work.approvalDigest
           ? work.kind === "default_cleanup"
             ? cleanupDigest(card, (await this.store.readConfig(feedId)).defaultCleanup)
@@ -2254,6 +2372,9 @@ export class AttentionDomain {
           work.verifiedApprovalDigest !== work.approvalDigest
         ) {
           throw new Error("Approved action must pass action:verify immediately before the external mutation.");
+        }
+        if (work.kind === "execute_approved_action" || work.kind === "default_cleanup") {
+          this.assertConnectorVerificationCurrent(work);
         }
         if (work.kind === "execute_approved_action") {
           const action = configuredApprovalAction(card, work.cardActionId);
@@ -2318,20 +2439,46 @@ export class AttentionDomain {
     });
   }
 
-  async verifyApprovedAction(feedId: string, workId: string, token: string, authenticatedMailbox?: string): Promise<{ approvalDigest: string; action: ProposedAction; artifact?: CardBlock; verifiedMailbox?: string; completionCleanup?: string }> {
+  async verifyApprovedAction(
+    feedId: string,
+    workId: string,
+    token: string,
+    observationOrMailbox?: ConnectorVerificationObservation | string,
+  ): Promise<{
+    approvalDigest: string;
+    action: ProposedAction;
+    artifact?: CardBlock;
+    verifiedMailbox?: string;
+    connectorVerification?: ConnectorVerificationReceipt;
+    completionCleanup?: string;
+  }> {
     return this.store.serialize(async () => {
       const work = await this.store.readWork(feedId, workId);
       if (work.status !== "working") throw new Error("Approved action work must be claimed before verification.");
       if ((work.kind !== "execute_approved_action" && work.kind !== "default_cleanup" && work.kind !== "routine_action_batch") || !work.approvalDigest) throw new Error("Work item is not an approved action.");
       if (work.capabilityToken !== token) throw new Error("Invalid scoped work capability token.");
-      let result: { approvalDigest: string; action: ProposedAction; artifact?: CardBlock; verifiedMailbox?: string; completionCleanup?: string };
+      let result: {
+        approvalDigest: string;
+        action: ProposedAction;
+        artifact?: CardBlock;
+        verifiedMailbox?: string;
+        connectorVerification?: ConnectorVerificationReceipt;
+        completionCleanup?: string;
+      };
       if (work.kind === "routine_action_batch") {
         if (!work.routineActionGroupId) throw new Error("Routine action work is missing its group.");
         const group = await this.store.readRoutineActionGroup(feedId, work.routineActionGroupId);
         if (work.approvalDigest !== routineActionDigest(group)) throw new Error("Approval stale - reread and return the routine action group for review.");
+        const currentRequirement = await this.executionRequirementForAction(feedId, group.proposedAction);
+        if (currentRequirement || work.executionGrant) {
+          if (!currentRequirement || !work.executionGrant || executionRequirementDigest(currentRequirement) !== executionRequirementDigest(work.executionGrant)) {
+            throw new Error("Approval stale - the connector execution identity or capability changed after approval.");
+          }
+        }
         result = { approvalDigest: work.approvalDigest, action: group.proposedAction };
       } else {
         const card = await this.store.readCard(feedId, work.cardId);
+        await this.assertCardSourceCurrent(card);
         if (work.kind === "default_cleanup") {
           const config = await this.store.readConfig(feedId);
           if (work.instruction !== config.defaultCleanup || work.approvalDigest !== cleanupDigest(card, config.defaultCleanup)) throw new Error("Approval stale - reread and return the card for review.");
@@ -2345,7 +2492,13 @@ export class AttentionDomain {
           if (work.completionCleanup && work.completionCleanup !== (await this.store.readConfig(feedId)).defaultCleanup) {
             throw new Error("Approval stale - the configured completion cleanup changed after approval.");
           }
-          const verifiedMailbox = verifySourceMailbox(feedId, card, action, authenticatedMailbox);
+          await this.assertExecutionGrantCurrent(card, action, work.executionGrant);
+          const authenticatedMailbox = typeof observationOrMailbox === "string" ? observationOrMailbox : undefined;
+          const verifiedMailbox = verifySourceMailbox(feedId, card, action, authenticatedMailbox ?? (
+            observationOrMailbox && typeof observationOrMailbox === "object"
+              ? observationOrMailbox.observedIdentity.account
+              : undefined
+          ));
           result = {
             approvalDigest: work.approvalDigest,
             action,
@@ -2355,11 +2508,38 @@ export class AttentionDomain {
           };
         }
       }
+      if (work.executionGrant) {
+        const observation: ConnectorVerificationObservation | undefined = typeof observationOrMailbox === "string"
+          ? {
+              provider: work.executionGrant.provider,
+              operation: work.executionGrant.operation,
+              observedIdentity: { account: observationOrMailbox },
+              assurance: "agent_host_observed",
+              observedAt: isoNow(),
+              nonce: work.executionGrant.nonce,
+            }
+          : observationOrMailbox;
+        if (!observation) {
+          throw new Error(`Connector verification requires a fresh ${work.executionGrant.provider} identity observation for this execution grant.`);
+        }
+        result.connectorVerification = verifyConnectorObservation(work.executionGrant, observation);
+      }
       work.verifiedAt = isoNow();
       work.verifiedApprovalDigest = work.approvalDigest;
       work.verifiedMailbox = result.verifiedMailbox;
+      work.connectorVerification = result.connectorVerification;
       await this.store.writeWork(work);
-      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "action.verified", detail: { verifiedMailbox: work.verifiedMailbox } });
+      await this.store.appendEvent({
+        feedId,
+        cardId: work.cardId,
+        workId,
+        type: "action.verified",
+        detail: {
+          provider: work.connectorVerification?.provider,
+          assurance: work.connectorVerification?.assurance,
+          verifiedMailbox: work.verifiedMailbox,
+        },
+      });
       return result;
     });
   }
@@ -2571,11 +2751,48 @@ export class AttentionDomain {
     await this.store.serialize(() => this.store.writeSourceRecipe(feedId, sourceId, content.trim()));
   }
 
+  async configureSourceProfile(feedId: string, sourceId: string, input: SourceProfile): Promise<SourceRecipe> {
+    if (!Number.isInteger(input.cadenceMinutes) || input.cadenceMinutes < 1) throw new Error("Source cadenceMinutes must be a positive integer.");
+    if (!Number.isInteger(input.freshnessMinutes) || input.freshnessMinutes < 1) throw new Error("Source freshnessMinutes must be a positive integer.");
+    if (!Number.isInteger(input.lookbackDays) || input.lookbackDays < 1) throw new Error("Source lookbackDays must be a positive integer.");
+    const allowedCapabilities = new Set(["read", "prepare_reply", "send_reply", "write"]);
+    if (!Array.isArray(input.actionCapabilities) || input.actionCapabilities.some((capability) => !allowedCapabilities.has(capability))) {
+      throw new Error("Source actionCapabilities contains an unsupported capability.");
+    }
+    if (new Set(input.actionCapabilities).size !== input.actionCapabilities.length) throw new Error("Source actionCapabilities must be unique.");
+    if ((input.provider === "granola" || input.provider === "imessage") && input.actionCapabilities.some((capability) => capability === "send_reply" || capability === "write")) {
+      throw new Error(`${input.provider} is read-only and cannot be configured with outbound mutation capabilities.`);
+    }
+    const expectedIdentity = normalizeIdentity(input.expectedIdentity);
+    if (input.onboardingState === "connected" && !Object.keys(expectedIdentity).length) {
+      throw new Error("A connected source profile requires an exact expected identity.");
+    }
+    const profile: SourceProfile = {
+      ...input,
+      expectedIdentity,
+      actionCapabilities: [...input.actionCapabilities],
+      ...(input.scopeSummary?.trim() ? { scopeSummary: input.scopeSummary.trim() } : {}),
+    };
+    return this.store.serialize(() => this.store.writeSourceProfile(feedId, sourceId, profile));
+  }
+
   async upsertCard(feedId: string, input: Partial<Card> & Pick<Card, "id" | "title" | "why" | "blocks">): Promise<Card> {
     safeIdentifier(feedId, "Feed id");
     safeIdentifier(input.id, "Card id");
     validateCardBlocks(input.blocks);
     validateCardActions(input.actions);
+    if (input.proposedAction) await this.assertActionCanBeOffered(feedId, input.proposedAction);
+    for (const action of input.actions ?? []) {
+      if (action.behavior !== "approve_action" || !action.instruction) continue;
+      await this.assertActionCanBeOffered(feedId, {
+        label: action.label,
+        instruction: action.instruction,
+        ...(action.artifactBlockId ? { artifactBlockId: action.artifactBlockId } : {}),
+        ...(action.externalMutation !== undefined ? { externalMutation: action.externalMutation } : {}),
+        ...(action.mailboxPolicy ? { mailboxPolicy: action.mailboxPolicy } : {}),
+        ...(action.execution ? { execution: action.execution } : {}),
+      });
+    }
     const sourceRunIds = validateSourceRunIds(input.sourceRunIds);
     return this.store.serialize(async () => {
       const config = await this.store.readConfig(feedId);
@@ -2777,6 +2994,18 @@ export class AttentionDomain {
     },
   ): Promise<SourceAttempt> {
     return this.store.serializeAtomic(async () => {
+      const allowedOutcomes = new Set<SourceAttemptOutcome>([
+        "partial",
+        "rate_limited",
+        "permission_denied",
+        "identity_mismatch",
+        "connector_unavailable",
+        "transient_error",
+        "authorization_required",
+        "paused",
+        "disconnected",
+      ]);
+      if (!allowedOutcomes.has(input.outcome)) throw new Error("Successful and no-change collections must be recorded as source runs with complete collection proof.");
       const feed = await this.store.readFeed(feedId);
       if (!feed.sources.some((source) => source.id === sourceId)) throw new Error(`Source recipe not found: ${sourceId}`);
       if (input.triggerWorkId) await this.assertClaimedRecollectionWork(feedId, input.triggerWorkId);

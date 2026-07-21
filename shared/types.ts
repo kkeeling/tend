@@ -54,6 +54,48 @@ export interface SourceIdentity {
 
 export type SourceOnboardingState = "authorization_required" | "connected" | "paused" | "disconnected";
 export type SourceActionCapability = "read" | "prepare_reply" | "send_reply" | "write";
+export type ConnectorAssurance = "trusted_adapter" | "agent_host_observed" | "prepare_only";
+
+export interface ActionExecutionPolicy {
+  provider: SourceProvider;
+  operation: "send_reply" | "write";
+  sourceId?: string;
+  expectedIdentity?: SourceIdentity;
+  minimumAssurance?: Exclude<ConnectorAssurance, "prepare_only">;
+}
+
+export interface ConnectorExecutionRequirement {
+  provider: SourceProvider;
+  operation: ActionExecutionPolicy["operation"];
+  sourceId?: string;
+  expectedIdentity: SourceIdentity;
+  minimumAssurance: ConnectorAssurance;
+}
+
+export interface ConnectorExecutionGrant extends ConnectorExecutionRequirement {
+  nonce: string;
+  issuedAt: string;
+}
+
+export interface ConnectorVerificationObservation {
+  provider: SourceProvider;
+  operation: ActionExecutionPolicy["operation"];
+  observedIdentity: SourceIdentity;
+  assurance: Exclude<ConnectorAssurance, "prepare_only">;
+  observedAt: string;
+  nonce: string;
+  adapterReceipt?: string;
+}
+
+export interface ConnectorVerificationReceipt extends ConnectorExecutionRequirement {
+  observedIdentity: SourceIdentity;
+  assurance: Exclude<ConnectorAssurance, "prepare_only">;
+  observedAt: string;
+  verifiedAt: string;
+  nonce: string;
+  grantDigest: string;
+  adapterReceiptDigest?: string;
+}
 
 export interface SourceProfile {
   provider: SourceProvider;
@@ -452,6 +494,7 @@ export interface ProposedAction {
   artifactBlockId?: string;
   externalMutation?: boolean;
   mailboxPolicy?: "reply_from_source";
+  execution?: ActionExecutionPolicy;
 }
 
 export interface CardAction {
@@ -465,6 +508,7 @@ export interface CardAction {
   artifactBlockId?: string;
   externalMutation?: boolean;
   mailboxPolicy?: "reply_from_source";
+  execution?: ActionExecutionPolicy;
   variant?: "primary" | "secondary";
   shortcut?: string;
 }
@@ -680,10 +724,12 @@ export interface WorkItem {
   verifiedAt?: string;
   verifiedApprovalDigest?: string;
   verifiedMailbox?: string;
+  executionGrant?: ConnectorExecutionGrant;
+  connectorVerification?: ConnectorVerificationReceipt;
   sourceMobileCommandId?: string;
 }
 
-export type WorkItemView = Omit<WorkItem, "capabilityToken">;
+export type WorkItemView = Omit<WorkItem, "capabilityToken" | "executionGrant" | "connectorVerification">;
 
 export interface WorkClaimedByReport {
   claim: "claimed_by_other";

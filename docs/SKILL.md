@@ -10,7 +10,12 @@ Use this skill when a Codex Desktop thread is connected to a local Tend feed.
 - Treat the feed binding as ownership. Do not drain another feed unless explicitly using cross-feed work.
 - List queued work before using Gmail, GitHub, Slack, browser, filesystem, or other local connectors.
 - Claim work before acting on a queued instruction.
-- For approved external mutations, call `tend cli action:verify` immediately before the connector mutation. If `work:claim` includes `operatorGuidance.userAuthorization.riskConfirmation`, that in-app receipt is the user's risk confirmation for the named recipients while the verified digest still matches.
+- For approved external mutations, freshly observe the exact connector profile and call
+  `tend cli action:verify` with the claimed execution nonce immediately before mutation. The
+  `agent_host_observed` level names the host trust boundary rather than cryptographic authentication;
+  `prepare_only` prohibits mutation. If `work:claim` includes
+  `operatorGuidance.userAuthorization.riskConfirmation`, that in-app receipt is the user's risk
+  confirmation for the named recipients while the verified digest still matches.
 - Complete, fail, block, retry, or cancel claimed work through `tend cli`.
 - Refresh sources only after the queue is drained, unless the claimed work explicitly asks for collection.
 - Read the prompt-safe On Your Mind context before collecting sources. Treat it as temporary
@@ -72,7 +77,7 @@ waking this same thread and saying `go deal with the feed`.
 ## Completing Work
 
 ```sh
-tend cli action:verify --feed <feed-id> --work <work-id> --token <token>
+tend cli action:verify --feed <feed-id> --work <work-id> --token <token> --identity-file <fresh-observation.json>
 tend cli work:complete --feed <feed-id> --work <work-id> --token <token> --result '{"response":"...","postAction":{"cleanup":{"status":"completed","detail":"Verified no current source rows remain."},"disposition":"done"}}'
 ```
 

@@ -266,6 +266,17 @@ function ContextInfluenceReceipt({ card }: { card: Card }) {
   );
 }
 
+function connectorAssuranceLabel(card: Card, actions: CardAction[]): string | null {
+  const external = actions.find((action) => action.behavior === "approve_action" && action.externalMutation);
+  if (!external) return null;
+  if (external.execution?.provider === "granola" || external.execution?.provider === "imessage") return "Prepare only · no outbound access";
+  if (external.execution?.minimumAssurance === "trusted_adapter" || external.execution?.provider === "custom") {
+    return "Trusted adapter receipt required";
+  }
+  if (external.execution || card.sourceMailbox) return "Connector host identity checked before action";
+  return null;
+}
+
 export function CardView({
   card,
   queuedNote,
@@ -291,6 +302,7 @@ export function CardView({
   const nextThing = card.proposedAction?.label === "Decide disposition"
     ? "Dismiss, or tell Codex what to do"
     : card.proposedAction?.label ?? actions.find((action) => action.variant === "primary")?.label ?? actions[0]?.label;
+  const assuranceLabel = connectorAssuranceLabel(card, actions);
   return (
     <article className={`attention-card ${card.contextInfluence ? "has-context-influence" : ""} ${active ? "is-active" : ""}`} data-card-id={domId} onClick={onActivate} onMouseEnter={onActivate}>
       <div className="card-rule" />
@@ -323,6 +335,7 @@ export function CardView({
             <span className="action-label">Next thing</span>
             {nextThing && <b>{nextThing}</b>}
             {card.sourceMailbox && <small className="reply-mailbox">Reply from {card.sourceMailbox}</small>}
+            {assuranceLabel && <small className="action-assurance">{assuranceLabel}</small>}
           </div>
           <div className="action-buttons">
             {actions.map((action) => (

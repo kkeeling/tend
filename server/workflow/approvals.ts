@@ -16,6 +16,7 @@ export function configuredApprovalAction(card: Card, cardActionId?: string): Pro
     ...(action.artifactBlockId ? { artifactBlockId: action.artifactBlockId } : {}),
     ...(action.externalMutation !== undefined ? { externalMutation: action.externalMutation } : {}),
     ...(action.mailboxPolicy ? { mailboxPolicy: action.mailboxPolicy } : {}),
+    ...(action.execution ? { execution: action.execution } : {}),
   };
 }
 

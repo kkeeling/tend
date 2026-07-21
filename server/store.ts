@@ -90,7 +90,12 @@ function defaultDrainState(): DrainState {
 }
 
 export function workItemView(work: WorkItem): WorkItemView {
-  const { capabilityToken: _capabilityToken, ...view } = work;
+  const {
+    capabilityToken: _capabilityToken,
+    executionGrant: _executionGrant,
+    connectorVerification: _connectorVerification,
+    ...view
+  } = work;
   return view;
 }
 
@@ -275,7 +280,6 @@ export class AttentionStore {
       if (leftProjected !== rightProjected) return leftProjected ? -1 : 1;
       return left.priority.rank - right.priority.rank
         || right.priority.score - left.priority.score
-        || right.card.updatedAt.localeCompare(left.card.updatedAt)
         || left.id.localeCompare(right.id);
     }).map((item, index) => ({ ...item, priority: { ...item.priority, rank: index + 1 } }));
 
@@ -712,6 +716,14 @@ export class AttentionStore {
   async writeSourceRecipe(feedId: string, sourceId: string, content: string): Promise<void> {
     await this.sources.writeContent(feedId, sourceId, content);
     await this.appendEvent({ feedId, type: "source.recipe_edited", detail: { sourceId } });
+  }
+
+  async writeSourceProfile(feedId: string, sourceId: string, profile: SourceRecipe["profile"]): Promise<SourceRecipe> {
+    const record = await this.sources.get(feedId, sourceId);
+    const recipe = { ...record.recipe, profile };
+    await this.sources.write(feedId, recipe, record.content, record.checkpoint);
+    await this.appendEvent({ feedId, type: "source.profile_updated", detail: { sourceId, provider: profile?.provider, onboardingState: profile?.onboardingState } });
+    return recipe;
   }
 
   async readSourceContent(feedId: string, sourceId: string): Promise<string> {

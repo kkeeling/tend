@@ -21,6 +21,7 @@ export interface ClaimedWorkOutput extends WorkItem {
     visibleCardIds?: string[];
     sourceRunRule?: string;
     postActionRule?: string;
+    connectorVerification?: string;
   };
 }
 
@@ -74,6 +75,8 @@ const APPROVAL_INVALIDATIONS = [
   "the approved artifact changes",
   "the recipient or source context changes",
   "the source mailbox changes",
+  "the connector identity or capability changes",
+  "the owning source evidence changes",
   "the approval digest no longer matches",
 ];
 
@@ -225,6 +228,12 @@ export function formatWorkClaimOutput(feedId: string, work: WorkClaimResult, con
   const userAuthorization = buildAuthorizationReceipt(work, context);
   if (userAuthorization) {
     operatorGuidance.userAuthorization = userAuthorization;
+  }
+
+  if (work.executionGrant) {
+    operatorGuidance.connectorVerification = work.executionGrant.minimumAssurance === "prepare_only"
+      ? `${work.executionGrant.provider} is prepare-only for ${work.executionGrant.operation}; do not invoke an external mutation.`
+      : `Immediately before mutation, freshly observe the ${work.executionGrant.provider} connector profile and call action:verify with a provider-neutral identity receipt using nonce ${work.executionGrant.nonce}. Required assurance: ${work.executionGrant.minimumAssurance}. agent_host_observed names the trusted host boundary and is not cryptographic authentication.`;
   }
 
   if (work.kind === "execute_approved_action" && work.completionCleanup) {
