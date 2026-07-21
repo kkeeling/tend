@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { attentionDbPath } from "./paths";
-import type { Card, CommitmentCandidate, CommitmentEvent, FeedEvent, MindContextBinding, MindContextUpdate, PolicyRevision, RevisionProposal, RoutineActionGroup, SourceAttempt, SourceRecipe, SourceRun, SweepBatch, SweepFeedbackTrace, SweepState, WorkItem, WorkspaceCommitment, WorkspaceRevision } from "../shared/types";
+import type { Card, CommitmentCandidate, CommitmentEvent, FeedEvent, MindContextBinding, MindContextUpdate, PolicyRevision, PriorityLedgerEntry, PriorityRuleProposal, PriorityRuleSet, RevisionProposal, RoutineActionGroup, SourceAttempt, SourceRecipe, SourceRun, SweepBatch, SweepFeedbackTrace, SweepState, WorkItem, WorkspaceCommitment, WorkspaceNowRow, WorkspaceRevision } from "../shared/types";
 import type { MobileCommandReceipt } from "../shared/mobile";
 import type { CardRepository } from "./repositories/cards";
 import type { FeedEventRepository } from "./repositories/feedEvents";
@@ -20,8 +20,11 @@ import type { WorkspaceFeedRepository } from "./repositories/workspaceFeeds";
 import type { CommitmentCandidateRepository } from "./repositories/commitmentCandidates";
 import type { CommitmentEventRepository } from "./repositories/commitmentEvents";
 import type { WorkspaceCommitmentRepository } from "./repositories/workspaceCommitments";
+import type { PriorityRuleRepository } from "./repositories/priorityRules";
+import type { PriorityLedgerRepository } from "./repositories/priorityLedger";
+import type { WorkspaceNowProjectionRepository } from "./repositories/workspaceNowProjection";
 
-export const SQLITE_SCHEMA_VERSION = 16;
+export const SQLITE_SCHEMA_VERSION = 17;
 
 export type LocalRuntimeStatus = {
   dbPath: string;
@@ -158,6 +161,38 @@ export class LocalSqliteStore {
         payload_json TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_commitment_events_commitment_at ON commitment_events (commitment_id, at, id);
+      CREATE TABLE IF NOT EXISTS priority_rule_sets (
+        id TEXT PRIMARY KEY,
+        version INTEGER NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        approved_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_priority_rule_sets_status_version ON priority_rule_sets (status, version);
+      CREATE TABLE IF NOT EXISTS priority_rule_proposals (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_priority_rule_proposals_status_created ON priority_rule_proposals (status, created_at, id);
+      CREATE TABLE IF NOT EXISTS priority_ledger (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        commitment_id TEXT,
+        at TEXT NOT NULL,
+        input_digest TEXT,
+        payload_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_priority_ledger_commitment_at ON priority_ledger (commitment_id, at, id);
+      CREATE TABLE IF NOT EXISTS workspace_now_projection (
+        id TEXT PRIMARY KEY,
+        rank INTEGER NOT NULL,
+        commitment_id TEXT,
+        input_digest TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_now_projection_rank ON workspace_now_projection (rank);
       CREATE TABLE IF NOT EXISTS source_recipes (
         feed_id TEXT NOT NULL,
         source_id TEXT NOT NULL,
@@ -330,6 +365,10 @@ export class LocalSqliteStore {
   workspaceCommitments(): WorkspaceCommitmentRepository {
     return new SqliteWorkspaceCommitmentRepository(() => this.database());
   }
+
+  priorityRules(): PriorityRuleRepository { return new SqlitePriorityRuleRepository(() => this.database()); }
+  priorityLedger(): PriorityLedgerRepository { return new SqlitePriorityLedgerRepository(() => this.database()); }
+  workspaceNowProjection(): WorkspaceNowProjectionRepository { return new SqliteWorkspaceNowProjectionRepository(() => this.database()); }
 
   sources(): SourceRepository {
     return new SqliteSourceRepository(() => this.database());
@@ -893,6 +932,60 @@ class SqliteCommitmentEventRepository implements CommitmentEventRepository {
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(id) DO NOTHING
     `).run(event.id, event.commitmentId, event.type, event.at, JSON.stringify(event));
+  }
+}
+
+class SqlitePriorityRuleRepository implements PriorityRuleRepository {
+  constructor(private readonly database: () => Database) {}
+  async init(): Promise<void> {}
+  async listRuleSets(): Promise<PriorityRuleSet[]> {
+    return (this.database().query("SELECT payload_json FROM priority_rule_sets ORDER BY version ASC").all() as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as PriorityRuleSet);
+  }
+  async active(): Promise<PriorityRuleSet | null> {
+    const row = this.database().query("SELECT payload_json FROM priority_rule_sets WHERE status = 'active' ORDER BY version DESC LIMIT 1").get() as { payload_json: string } | undefined;
+    return row ? JSON.parse(row.payload_json) as PriorityRuleSet : null;
+  }
+  async writeRuleSet(ruleSet: PriorityRuleSet): Promise<void> {
+    this.database().query(`INSERT INTO priority_rule_sets (id, version, status, approved_at, payload_json) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, payload_json = excluded.payload_json`)
+      .run(ruleSet.id, ruleSet.version, ruleSet.status, ruleSet.approvedAt, JSON.stringify(ruleSet));
+  }
+  async listProposals(): Promise<PriorityRuleProposal[]> {
+    return (this.database().query("SELECT payload_json FROM priority_rule_proposals ORDER BY created_at ASC, id ASC").all() as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as PriorityRuleProposal);
+  }
+  async getProposal(id: string): Promise<PriorityRuleProposal> {
+    const row = this.database().query("SELECT payload_json FROM priority_rule_proposals WHERE id = ?").get(id) as { payload_json: string } | undefined;
+    if (!row) throw new Error(`Priority rule proposal not found: ${id}`);
+    return JSON.parse(row.payload_json) as PriorityRuleProposal;
+  }
+  async writeProposal(proposal: PriorityRuleProposal): Promise<void> {
+    this.database().query(`INSERT INTO priority_rule_proposals (id, status, created_at, payload_json) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, payload_json = excluded.payload_json`)
+      .run(proposal.id, proposal.status, proposal.createdAt, JSON.stringify(proposal));
+  }
+}
+
+class SqlitePriorityLedgerRepository implements PriorityLedgerRepository {
+  constructor(private readonly database: () => Database) {}
+  async init(): Promise<void> {}
+  async list(): Promise<PriorityLedgerEntry[]> {
+    return (this.database().query("SELECT payload_json FROM priority_ledger ORDER BY at ASC, id ASC").all() as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as PriorityLedgerEntry);
+  }
+  async append(entry: PriorityLedgerEntry): Promise<void> {
+    this.database().query(`INSERT INTO priority_ledger (id, type, commitment_id, at, input_digest, payload_json) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`)
+      .run(entry.id, entry.type, entry.commitmentId ?? null, entry.at, entry.inputDigest ?? null, JSON.stringify(entry));
+  }
+}
+
+class SqliteWorkspaceNowProjectionRepository implements WorkspaceNowProjectionRepository {
+  constructor(private readonly database: () => Database) {}
+  async init(): Promise<void> {}
+  async list(): Promise<WorkspaceNowRow[]> {
+    return (this.database().query("SELECT payload_json FROM workspace_now_projection ORDER BY rank ASC, id ASC").all() as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as WorkspaceNowRow);
+  }
+  async replace(rows: WorkspaceNowRow[]): Promise<void> {
+    const db = this.database();
+    db.query("DELETE FROM workspace_now_projection").run();
+    const insert = db.query("INSERT INTO workspace_now_projection (id, rank, commitment_id, input_digest, payload_json) VALUES (?, ?, ?, ?, ?)");
+    for (const row of rows) insert.run(row.id, row.rank, row.commitmentId ?? null, row.inputDigest, JSON.stringify(row));
   }
 }
 

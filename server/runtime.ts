@@ -18,6 +18,9 @@ import { FileWorkspaceFeedRepository, MirroredWorkspaceFeedRepository } from "./
 import { FileCommitmentCandidateRepository, MirroredCommitmentCandidateRepository } from "./repositories/commitmentCandidates";
 import { FileCommitmentEventRepository, MirroredCommitmentEventRepository } from "./repositories/commitmentEvents";
 import { FileWorkspaceCommitmentRepository, MirroredWorkspaceCommitmentRepository } from "./repositories/workspaceCommitments";
+import { FilePriorityRuleRepository, MirroredPriorityRuleRepository } from "./repositories/priorityRules";
+import { FilePriorityLedgerRepository, MirroredPriorityLedgerRepository } from "./repositories/priorityLedger";
+import { FileWorkspaceNowProjectionRepository, MirroredWorkspaceNowProjectionRepository } from "./repositories/workspaceNowProjection";
 import { LocalSqliteStore } from "./sqlite";
 import { AttentionStore } from "./store";
 
@@ -62,6 +65,9 @@ export async function createLocalRuntime(
     sqlite.workspaceCommitments(),
     new FileWorkspaceCommitmentRepository(dataDir),
   );
+  const priorityRules = new MirroredPriorityRuleRepository(sqlite.priorityRules(), new FilePriorityRuleRepository(dataDir));
+  const priorityLedger = new MirroredPriorityLedgerRepository(sqlite.priorityLedger(), new FilePriorityLedgerRepository(dataDir), mirrorWrites);
+  const workspaceNowProjection = new MirroredWorkspaceNowProjectionRepository(sqlite.workspaceNowProjection(), new FileWorkspaceNowProjectionRepository(dataDir));
   const events = new MirroredFeedEventRepository(
     sqlite.feedEvents(),
     new FileFeedEventRepository(dataDir),
@@ -125,6 +131,8 @@ export async function createLocalRuntime(
     mindContext,
     mobileCommandReceipts,
     revisions,
+    priorityLedger,
+    priorityRules,
     routineActionGroups,
     runAtomic: (callback) => mirrorWrites.transaction(() => sqlite.transaction(callback)),
     sourceAttempts,
@@ -135,6 +143,7 @@ export async function createLocalRuntime(
     workItems,
     workspaceCommitments,
     workspaceFeeds,
+    workspaceNowProjection,
   });
   await store.init();
   return { dataDir, sqlite, store };

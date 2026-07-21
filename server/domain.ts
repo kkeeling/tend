@@ -8,7 +8,6 @@ import type {
   CardContextInfluence,
   CommitmentCandidate,
   CommitmentCandidateInput,
-  CommitmentEvent,
   CommitmentLifecycle,
   FeedConfig,
   FeedMindContext,
@@ -24,6 +23,9 @@ import type {
   MindContextUpdate,
   MindContextWorkspace,
   PolicyRevision,
+  PriorityRuleDefinition,
+  PriorityRuleProposal,
+  PriorityRuleSet,
   PostActionCompletion,
   ProposedAction,
   RevisionProposal,
@@ -45,6 +47,7 @@ import type {
   WorkItemView,
   WorkspaceRevision,
   WorkspaceCommitment,
+  WorkspaceNowRow,
 } from "../shared/types";
 import type { MobileActionProjection, MobileCommand, MobileCommandResult, MobileCommandReceipt } from "../shared/mobile";
 import { isReservedCardActionId, safeConfiguredCardActions } from "../shared/cardActions";
@@ -58,6 +61,7 @@ import { actionDigest, cleanupDigest, configuredApprovalAction, requiredSourceMa
 import { queuedWork } from "./workflow/workItems";
 import { mobileActionConfirmation, projectMobileCard, projectMobileRoutineAction } from "./mobile/projection";
 import { assertCommitmentTransition } from "./workflow/commitments";
+import { evaluatePriorityRows } from "./workflow/priority";
 
 function appendHistory(card: Card, type: string, detail?: string): void {
   card.history.push({ at: isoNow(), type, detail });
@@ -2961,6 +2965,7 @@ export class AttentionDomain {
         ...(candidate.normalized.dueAt ? { dueAt: candidate.normalized.dueAt } : {}),
         certainty: candidate.certainty,
         status: "open",
+        priorityContext: candidate.priorityContext ?? { domain: ownerFeedId, consequence: "medium" },
         signals: [],
         createdAt: now,
         updatedAt: now,
@@ -3011,6 +3016,133 @@ export class AttentionDomain {
       await this.store.writeCard(card);
     }
     return commitment;
+  }
+
+  async activateInitialPriorityRules(rules: PriorityRuleDefinition, reason: string): Promise<PriorityRuleSet> {
+    return this.store.serializeAtomic(async () => {
+      if (await this.store.readActivePriorityRuleSet()) throw new Error("An active priority rule set already exists; propose a correction instead.");
+      const normalized = this.validatePriorityRules(rules);
+      const at = isoNow();
+      const ruleSet: PriorityRuleSet = {
+        id: makeId("priority-rules"),
+        version: 1,
+        status: "active",
+        rules: normalized,
+        reason: requiredMindText(reason, "Priority rule approval reason", 500),
+        createdAt: at,
+        approvedAt: at,
+      };
+      await this.store.writePriorityRuleSet(ruleSet);
+      await this.store.appendPriorityLedger({ id: makeId("priority-ledger"), type: "approval", at, ruleVersion: ruleSet.version, detail: { ruleSetId: ruleSet.id, reason: ruleSet.reason, rules: ruleSet.rules } });
+      return ruleSet;
+    });
+  }
+
+  async evaluateWorkspacePriorities(judgmentPolicyVersion: string, now = new Date()): Promise<WorkspaceNowRow[]> {
+    return this.store.serializeAtomic(async () => {
+      const policyVersion = requiredMindText(judgmentPolicyVersion, "Priority judgment policy version", 80);
+      const ruleSet = await this.store.readActivePriorityRuleSet();
+      if (!ruleSet) throw new Error("Priority rules are not configured; ordering is unavailable rather than model-guessed.");
+      const rows = evaluatePriorityRows(await this.store.listWorkspaceCommitments(), ruleSet, policyVersion, now);
+      const previous = await this.store.readWorkspaceNowProjection();
+      if (previous.length === rows.length && previous.every((row, index) => row.id === rows[index]?.id && row.inputDigest === rows[index]?.inputDigest)) return previous;
+
+      const previousById = new Map(previous.map((row) => [row.id, row]));
+      for (const row of rows) {
+        if (previousById.get(row.id)?.inputDigest === row.inputDigest) continue;
+        await this.store.appendPriorityLedger({
+          id: makeId("priority-ledger"),
+          type: "evaluation",
+          at: row.evaluatedAt,
+          commitmentId: row.commitmentId,
+          ruleVersion: row.ruleVersion,
+          inputDigest: row.inputDigest,
+          detail: { rank: row.rank, score: row.score, explanation: row.explanation, judgmentPolicyVersion: row.judgmentPolicyVersion },
+        });
+        if (row.overrideReason) {
+          await this.store.appendPriorityLedger({
+            id: makeId("priority-ledger"),
+            type: "override",
+            at: row.evaluatedAt,
+            commitmentId: row.commitmentId,
+            ruleVersion: row.ruleVersion,
+            inputDigest: row.inputDigest,
+            detail: { rank: row.rank, reason: row.overrideReason },
+          });
+        }
+      }
+      await this.store.replaceWorkspaceNowProjection(rows);
+      return rows;
+    });
+  }
+
+  async recordPriorityCorrection(input: {
+    preferredCommitmentId: string;
+    overCommitmentId: string;
+    reason: string;
+    proposedRules: PriorityRuleDefinition;
+  }): Promise<PriorityRuleProposal> {
+    return this.store.serializeAtomic(async () => {
+      await this.store.readWorkspaceCommitment(input.preferredCommitmentId);
+      await this.store.readWorkspaceCommitment(input.overCommitmentId);
+      if (input.preferredCommitmentId === input.overCommitmentId) throw new Error("A priority correction requires two different commitments.");
+      const active = await this.store.readActivePriorityRuleSet();
+      if (!active) throw new Error("Priority rules are not configured.");
+      const at = isoNow();
+      const proposal: PriorityRuleProposal = {
+        id: makeId("priority-proposal"),
+        baseVersion: active.version,
+        preferredCommitmentId: input.preferredCommitmentId,
+        overCommitmentId: input.overCommitmentId,
+        reason: requiredMindText(input.reason, "Priority correction reason", 500),
+        proposedRules: this.validatePriorityRules(input.proposedRules),
+        status: "proposed",
+        createdAt: at,
+      };
+      await this.store.writePriorityRuleProposal(proposal);
+      await this.store.appendPriorityLedger({ id: makeId("priority-ledger"), type: "correction", at, ruleVersion: active.version, detail: { proposalId: proposal.id, preferredCommitmentId: proposal.preferredCommitmentId, overCommitmentId: proposal.overCommitmentId, reason: proposal.reason } });
+      await this.store.appendPriorityLedger({ id: makeId("priority-ledger"), type: "proposal", at, ruleVersion: active.version, detail: { proposalId: proposal.id, proposedRules: proposal.proposedRules } });
+      return proposal;
+    });
+  }
+
+  async approvePriorityRuleProposal(proposalId: string): Promise<PriorityRuleSet> {
+    return this.store.serializeAtomic(async () => {
+      const proposal = await this.store.readPriorityRuleProposal(proposalId);
+      if (proposal.status !== "proposed") throw new Error("Priority rule proposal has already been decided.");
+      const active = await this.store.readActivePriorityRuleSet();
+      if (!active || active.version !== proposal.baseVersion) throw new Error("Priority rule proposal is stale; review it against the active rules.");
+      const at = isoNow();
+      active.status = "superseded";
+      await this.store.writePriorityRuleSet(active);
+      const next: PriorityRuleSet = {
+        id: makeId("priority-rules"),
+        version: active.version + 1,
+        status: "active",
+        rules: proposal.proposedRules,
+        reason: proposal.reason,
+        createdAt: at,
+        approvedAt: at,
+      };
+      await this.store.writePriorityRuleSet(next);
+      proposal.status = "approved";
+      proposal.decidedAt = at;
+      proposal.activatedRuleSetId = next.id;
+      await this.store.writePriorityRuleProposal(proposal);
+      await this.store.appendPriorityLedger({ id: makeId("priority-ledger"), type: "approval", at, ruleVersion: next.version, detail: { proposalId, ruleSetId: next.id, previousRuleSetId: active.id, rules: next.rules } });
+      return next;
+    });
+  }
+
+  private validatePriorityRules(rules: PriorityRuleDefinition): PriorityRuleDefinition {
+    if (!Array.isArray(rules.domainOrder) || !rules.domainOrder.length) throw new Error("Priority rules require at least one domain.");
+    const domainOrder = rules.domainOrder.map((domain, index) => requiredMindText(domain, `Priority domain ${index + 1}`, 100));
+    if (new Set(domainOrder).size !== domainOrder.length) throw new Error("Priority domain order must not contain duplicates.");
+    if (!Number.isInteger(rules.imminentWithinMinutes) || rules.imminentWithinMinutes < 1 || rules.imminentWithinMinutes > 10_080) {
+      throw new Error("Priority imminent window must be between 1 minute and 7 days.");
+    }
+    if (typeof rules.severeConsequenceOverride !== "boolean") throw new Error("Priority severe-consequence override must be explicit.");
+    return { domainOrder, imminentWithinMinutes: rules.imminentWithinMinutes, severeConsequenceOverride: rules.severeConsequenceOverride };
   }
 
   async recordSweepBatch(feedId: string, sourceRunIds: string[], triggerWorkId?: string, contextUpdateId?: string): Promise<string> {

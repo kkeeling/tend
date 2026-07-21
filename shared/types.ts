@@ -191,6 +191,12 @@ export interface NormalizedCommitment {
   dueAt?: string;
 }
 
+export interface CommitmentPriorityContext {
+  domain: string;
+  consequence: "low" | "medium" | "high" | "severe";
+  blocked?: boolean;
+}
+
 export interface CommitmentCandidateInput {
   sourceId: string;
   sourceRunId: string;
@@ -200,6 +206,7 @@ export interface CommitmentCandidateInput {
   explicitness: CommitmentExplicitness;
   certainty: number;
   normalized: NormalizedCommitment;
+  priorityContext?: CommitmentPriorityContext;
   judgmentPolicyVersion: string;
   sourceClass: string;
   qualityGatePassed: boolean;
@@ -227,6 +234,7 @@ export interface WorkspaceCommitment {
   dueAt?: string;
   certainty: number;
   status: CommitmentLifecycle;
+  priorityContext: CommitmentPriorityContext;
   signals: CommitmentSignalRef[];
   createdAt: string;
   updatedAt: string;
@@ -238,6 +246,60 @@ export interface CommitmentEvent {
   type: "created" | "signal_linked" | "candidate_confirmed" | "candidate_rejected" | "lifecycle_changed" | "split" | "owner_changed";
   at: string;
   detail: Record<string, unknown>;
+}
+
+export interface PriorityRuleDefinition {
+  domainOrder: string[];
+  imminentWithinMinutes: number;
+  severeConsequenceOverride: boolean;
+}
+
+export interface PriorityRuleSet {
+  id: string;
+  version: number;
+  status: "active" | "superseded";
+  rules: PriorityRuleDefinition;
+  reason: string;
+  createdAt: string;
+  approvedAt: string;
+}
+
+export interface PriorityRuleProposal {
+  id: string;
+  baseVersion: number;
+  preferredCommitmentId: string;
+  overCommitmentId: string;
+  reason: string;
+  proposedRules: PriorityRuleDefinition;
+  status: "proposed" | "approved" | "rejected";
+  createdAt: string;
+  decidedAt?: string;
+  activatedRuleSetId?: string;
+}
+
+export interface PriorityLedgerEntry {
+  id: string;
+  type: "evaluation" | "override" | "correction" | "proposal" | "approval";
+  at: string;
+  commitmentId?: string;
+  ruleVersion?: number;
+  inputDigest?: string;
+  detail: Record<string, unknown>;
+}
+
+export interface WorkspaceNowRow {
+  id: string;
+  cardRef: { feedId: FeedId; cardId: string };
+  commitmentId?: string;
+  rank: number;
+  score: number;
+  explanation: string;
+  overrideReason?: string;
+  ruleSetId: string;
+  ruleVersion: number;
+  judgmentPolicyVersion: string;
+  inputDigest: string;
+  evaluatedAt: string;
 }
 
 export interface ThreadBinding {
