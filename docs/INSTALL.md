@@ -103,9 +103,18 @@ The main Tend server never opens `~/Library/Messages/chat.db`. The packaged
 ./tend-imessage-helper collect --since 2026-07-20T00:00:00Z --limit 200
 ```
 
+On a later pass, provide both fields from the previous `nextWatermark` so messages sharing an exact
+timestamp resume after the last processed row:
+
+```sh
+./tend-imessage-helper collect --since 2026-07-20T00:00:00Z \
+  --after-apple-date 806500800000000000 --after-row-id 12345 --limit 200
+```
+
 On macOS, grant Full Disk Access to this helper only when you choose to enable the iMessage source.
 Do not grant it to the main Tend server. The helper accepts no database path or SQL argument, opens
-only the fixed Messages database read-only, caps lookback at 90 days and output at 500 messages,
+only the fixed Messages database read-only, accepts only its own emitted timestamp/row cursor,
+caps lookback at 90 days and output at 500 messages,
 and has no send/delete command. A denial is recorded as `permission_denied`; it is never treated as
 successful coverage.
 
@@ -128,6 +137,23 @@ go deal with the feed
 ```
 
 Use the manual wake after a paused or missing heartbeat, or whenever you want an immediate sweep.
+
+## Source Coverage Setup
+
+Every required connector source should have a private runtime profile before collection. The
+profile names the provider, expected account/tenant/workspace identity, required scope, cadence,
+freshness window, and bounded lookback. Verify the active connector profile exactly before binding
+or collecting; a connection to the wrong account is an `identity_mismatch`, not coverage.
+
+```sh
+tend cli source:profile:set --feed <feed> --source <source> --profile-file <private-json>
+tend cli workspace:coverage
+```
+
+Successful collection records a completeness proof with observed identity, watermarks,
+pagination/truncation, and permission enumeration. Failure paths use `source:attempt:record` and
+preserve the last good checkpoint. Keep profile files under private local storage, never in the
+repository. `/now` and `/coverage` withhold all-clear until every required profile is fresh.
 
 ## Health Check
 
@@ -155,6 +181,10 @@ Backups include a consistent SQLite snapshot, the readable `data/` mirrors, and 
 requires a destination that does not already exist. Import stages and validates the backup before
 swapping data, preserves the previous runtime until the swap succeeds, and refuses to run while the
 same Tend home is active. Legacy data-directory-only backups can still be imported.
+
+For a prerelease cutover, retain both the prior package and its compatible backup. Export the new
+schema before testing rollback, restore the prior package plus pre-cutover backup together, then
+restore the forward archive when returning to the prerelease.
 
 ## iPhone Companion
 

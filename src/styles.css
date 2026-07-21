@@ -375,8 +375,14 @@ pre { overflow: auto; padding: 12px; background: #f4f2eb; color: var(--ink-2); w
 .priority-explanation p { margin: 0; color: var(--ink-3); font-size: 12px; }
 .priority-explanation small { color: var(--ink-4); font-size: 10px; }
 .commitment-strip { display: flex; align-items: center; gap: 12px; margin: 0 0 -1px; padding: 9px 14px; border: 1px solid #d9d4c6; border-radius: 9px 9px 0 0; background: #f7f3e9; color: var(--ink-3); font-size: 11px; }
-.commitment-strip span { padding: 2px 7px; border-radius: 99px; background: #e5ecdf; color: #5c6d55; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.commitment-strip > span { padding: 2px 7px; border-radius: 99px; background: #e5ecdf; color: #5c6d55; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .commitment-strip time { margin-left: auto; }
+.commitment-provenance { position: relative; }
+.commitment-provenance summary { cursor: pointer; color: var(--ink-2); font-weight: 700; }
+.commitment-provenance ul { position: absolute; z-index: 3; min-width: 280px; margin: 7px 0 0; padding: 8px; border: 1px solid var(--line-2); border-radius: 8px; background: #fffffd; box-shadow: 0 10px 30px rgb(49 43 30 / 12%); list-style: none; }
+.commitment-provenance li { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 6px; }
+.commitment-provenance li + li { border-top: 1px solid var(--line); }
+.commitment-provenance li time { grid-column: 1 / -1; margin: 0; color: var(--ink-4); font-size: 10px; }
 .workspace-now-item .commitment-strip + .attention-card { border-radius: 0 0 11px 11px; }
 .control-empty { padding: 42px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper-warm); text-align: center; }
 .control-empty h1, .control-empty h2 { margin: 0 0 8px; }
@@ -463,4 +469,6 @@ pre { overflow: auto; padding: 12px; background: #f4f2eb; color: var(--ink-2); w
   .priority-explanation { margin-inline: 2px; }
   .commitment-strip { align-items: flex-start; flex-wrap: wrap; }
   .commitment-strip time { width: 100%; margin-left: 0; }
+  .commitment-provenance { width: 100%; }
+  .commitment-provenance ul { position: static; min-width: 0; }
 }

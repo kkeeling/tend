@@ -8,14 +8,14 @@ const value = (name: string) => {
 };
 
 if (command !== "collect") {
-  console.error("Usage: tend-imessage-helper collect --since <ISO-8601> [--limit <1-500>]");
+  console.error("Usage: tend-imessage-helper collect --since <ISO-8601> [--after-apple-date <decimal> --after-row-id <integer>] [--limit <1-500>]");
   process.exit(2);
 }
 if (argv.some((argument) => !argument.startsWith("--") && argv[argv.indexOf(argument) - 1]?.startsWith("--") !== true)) {
-  console.error("The iMessage helper accepts only collect, --since, and --limit.");
+  console.error("The iMessage helper accepts only collect and its fixed boundary, cursor, and limit options.");
   process.exit(2);
 }
-const allowedFlags = new Set(["--since", "--limit"]);
+const allowedFlags = new Set(["--since", "--after-apple-date", "--after-row-id", "--limit"]);
 for (const argument of argv.filter((item) => item.startsWith("--"))) {
   if (!allowedFlags.has(argument)) {
     console.error(`Unsupported iMessage helper option: ${argument}`);
@@ -26,8 +26,15 @@ for (const argument of argv.filter((item) => item.startsWith("--"))) {
 try {
   const since = value("since");
   if (!since) throw new Error("The iMessage helper requires --since.");
+  const afterAppleDate = value("after-apple-date");
+  const afterRowId = value("after-row-id");
+  if (Boolean(afterAppleDate) !== Boolean(afterRowId)) throw new Error("Use --after-apple-date and --after-row-id together.");
   const limitValue = value("limit");
-  const result = collectIMessageReadOnly({ since, ...(limitValue ? { limit: Number(limitValue) } : {}) });
+  const result = collectIMessageReadOnly({
+    since,
+    ...(afterAppleDate && afterRowId ? { after: { appleDate: afterAppleDate, rowId: Number(afterRowId) } } : {}),
+    ...(limitValue ? { limit: Number(limitValue) } : {}),
+  });
   console.log(JSON.stringify({ ok: true, ...result }));
 } catch (error) {
   if (error instanceof IMessageCollectorError) {

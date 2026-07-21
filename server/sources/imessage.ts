@@ -9,12 +9,12 @@ const MAX_MESSAGES = 500;
 const MAX_TEXT_LENGTH = 4_000;
 const REQUIRED_TABLES = ["message", "handle", "chat", "chat_message_join"] as const;
 
-const MESSAGE_QUERY = `
+const INITIAL_MESSAGE_QUERY = `
   SELECT
     m.ROWID AS row_id,
     m.guid AS message_guid,
     m.text AS message_text,
-    m.date AS apple_date,
+    CAST(m.date AS TEXT) AS apple_date,
     m.is_from_me AS is_from_me,
     m.service AS message_service,
     h.id AS sender_handle,
@@ -26,7 +26,30 @@ const MESSAGE_QUERY = `
   LEFT JOIN handle AS h ON h.ROWID = m.handle_id
   LEFT JOIN chat_message_join AS cmj ON cmj.message_id = m.ROWID
   LEFT JOIN chat AS c ON c.ROWID = cmj.chat_id
-  WHERE m.date >= ?
+  WHERE m.date >= CAST(? AS INTEGER)
+  ORDER BY m.date ASC, m.ROWID ASC
+  LIMIT ?
+`;
+
+const RESUME_MESSAGE_QUERY = `
+  SELECT
+    m.ROWID AS row_id,
+    m.guid AS message_guid,
+    m.text AS message_text,
+    CAST(m.date AS TEXT) AS apple_date,
+    m.is_from_me AS is_from_me,
+    m.service AS message_service,
+    h.id AS sender_handle,
+    c.guid AS chat_guid,
+    c.chat_identifier AS chat_identifier,
+    c.display_name AS chat_name,
+    c.service_name AS chat_service
+  FROM message AS m
+  LEFT JOIN handle AS h ON h.ROWID = m.handle_id
+  LEFT JOIN chat_message_join AS cmj ON cmj.message_id = m.ROWID
+  LEFT JOIN chat AS c ON c.ROWID = cmj.chat_id
+  WHERE m.date > CAST(? AS INTEGER)
+    OR (m.date = CAST(? AS INTEGER) AND m.ROWID > ?)
   ORDER BY m.date ASC, m.ROWID ASC
   LIMIT ?
 `;
@@ -35,7 +58,7 @@ interface IMessageRow {
   row_id: number;
   message_guid: string | null;
   message_text: string | null;
-  apple_date: number;
+  apple_date: string;
   is_from_me: number;
   message_service: string | null;
   sender_handle: string | null;
@@ -64,7 +87,7 @@ export interface IMessageCollection {
   schema: "tend.imessage.readonly.v1";
   collectedAt: string;
   observedIdentity: SourceIdentity;
-  scope: { since: string; limit: number };
+  scope: { since: string; after?: { appleDate: string; rowId: number }; limit: number };
   messages: Array<{
     id: string;
     threadId: string;
@@ -76,7 +99,7 @@ export interface IMessageCollection {
     text?: string;
     textUnavailable?: true;
   }>;
-  nextWatermark: { appleDate: number; rowId: number } | null;
+  nextWatermark: { appleDate: string; rowId: number } | null;
   truncated: boolean;
 }
 
@@ -96,7 +119,7 @@ export function fixedMessagesDatabasePath(homeDirectory = os.homedir()): string 
 }
 
 export function collectIMessageReadOnly(
-  input: { since: string; limit?: number },
+  input: { since: string; after?: { appleDate: string; rowId: number }; limit?: number },
   dependencies: IMessageCollectorDependencies = {},
 ): IMessageCollection {
   const now = dependencies.now ?? new Date();
@@ -106,6 +129,7 @@ export function collectIMessageReadOnly(
   if (now.getTime() - since.getTime() > MAX_LOOKBACK_MS) throw new Error("iMessage collection lookback cannot exceed 90 days.");
   const limit = input.limit ?? 200;
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_MESSAGES) throw new Error(`iMessage collection limit must be between 1 and ${MAX_MESSAGES}.`);
+  const after = validateWatermark(input.after, since, now);
 
   const databasePath = dependencies.databasePath ?? fixedMessagesDatabasePath();
   const openDatabase = dependencies.openDatabase ?? ((filename: string) => new Database(filename, { readonly: true, strict: true }));
@@ -114,14 +138,16 @@ export function collectIMessageReadOnly(
     database = openDatabase(databasePath);
     database.exec("PRAGMA query_only = ON;");
     assertMessagesSchema(database);
-    const rows = database.query(MESSAGE_QUERY).all(toAppleNanoseconds(since), limit + 1) as IMessageRow[];
+    const rows = (after
+      ? database.query(RESUME_MESSAGE_QUERY).all(after.appleDate, after.appleDate, after.rowId, limit + 1)
+      : database.query(INITIAL_MESSAGE_QUERY).all(toAppleNanoseconds(since), limit + 1)) as IMessageRow[];
     const visible = rows.slice(0, limit);
     const last = visible.at(-1);
     return {
       schema: "tend.imessage.readonly.v1",
       collectedAt: now.toISOString(),
       observedIdentity: { device: (dependencies.hostname ?? os.hostname()).trim().toLowerCase() },
-      scope: { since: since.toISOString(), limit },
+      scope: { since: since.toISOString(), ...(after ? { after } : {}), limit },
       messages: visible.map(minimizeMessage),
       nextWatermark: last ? { appleDate: last.apple_date, rowId: last.row_id } : null,
       truncated: rows.length > limit,
@@ -132,6 +158,20 @@ export function collectIMessageReadOnly(
   } finally {
     database?.close();
   }
+}
+
+function validateWatermark(
+  input: { appleDate: string; rowId: number } | undefined,
+  since: Date,
+  now: Date,
+): { appleDate: string; rowId: number } | undefined {
+  if (!input) return undefined;
+  if (!/^\d+$/.test(input.appleDate)) throw new Error("iMessage resume watermark requires a decimal Apple timestamp.");
+  if (!Number.isSafeInteger(input.rowId) || input.rowId < 1) throw new Error("iMessage resume watermark requires a positive safe row id.");
+  const appleDate = BigInt(input.appleDate);
+  if (appleDate < BigInt(toAppleNanoseconds(since))) throw new Error("iMessage resume watermark cannot precede the --since boundary.");
+  if (appleDate > BigInt(toAppleNanoseconds(new Date(now.getTime() + 5 * 60_000)))) throw new Error("iMessage resume watermark cannot be in the future.");
+  return { appleDate: appleDate.toString(), rowId: input.rowId };
 }
 
 function assertMessagesSchema(database: ReadonlyMessagesDatabase): void {
@@ -158,13 +198,17 @@ function minimizeMessage(row: IMessageRow): IMessageCollection["messages"][numbe
   };
 }
 
-function toAppleNanoseconds(date: Date): number {
-  return Math.round((date.getTime() / 1_000 - APPLE_EPOCH_SECONDS) * 1_000_000_000);
+function toAppleNanoseconds(date: Date): string {
+  return ((BigInt(date.getTime()) - BigInt(APPLE_EPOCH_SECONDS) * 1_000n) * 1_000_000n).toString();
 }
 
-function fromAppleTimestamp(value: number): Date {
-  const seconds = Math.abs(value) > 1_000_000_000_000 ? value / 1_000_000_000 : value;
-  return new Date((seconds + APPLE_EPOCH_SECONDS) * 1_000);
+function fromAppleTimestamp(value: string): Date {
+  const raw = BigInt(value);
+  const absolute = raw < 0n ? -raw : raw;
+  const unixMilliseconds = absolute > 1_000_000_000_000n
+    ? raw / 1_000_000n + BigInt(APPLE_EPOCH_SECONDS) * 1_000n
+    : (raw + BigInt(APPLE_EPOCH_SECONDS)) * 1_000n;
+  return new Date(Number(unixMilliseconds));
 }
 
 function classifyCollectorError(error: unknown): IMessageCollectorError {

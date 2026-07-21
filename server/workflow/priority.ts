@@ -2,6 +2,8 @@ import type { PriorityRuleSet, WorkspaceCommitment, WorkspaceNowRow } from "../.
 import { digest } from "../util";
 
 const consequenceScore = { low: 0, medium: 100, high: 250, severe: 500 } as const;
+const DOMAIN_TIER_SCORE = 10_000;
+export const DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION = "priority-v1";
 
 function dueBand(dueAt: string | undefined, now: Date): { label: string; score: number; minutes: number | null } {
   if (!dueAt) return { label: "no due date", score: 0, minutes: null };
@@ -22,25 +24,35 @@ export function evaluatePriorityRows(
   const active = commitments.filter((item) => !["fulfilled", "withdrawn", "superseded"].includes(item.status));
   const drafts = active.map((commitment) => {
     const domainIndex = ruleSet.rules.domainOrder.indexOf(commitment.priorityContext.domain);
-    const domainScore = domainIndex < 0 ? 0 : (ruleSet.rules.domainOrder.length - domainIndex) * 200;
     const due = dueBand(commitment.dueAt, now);
     const consequence = consequenceScore[commitment.priorityContext.consequence];
     const certainty = Math.round(commitment.certainty * 100);
     const blocked = commitment.priorityContext.blocked ? -150 : 0;
-    const score = domainScore + due.score + consequence + certainty + blocked;
     const lowerDomain = domainIndex > 0;
     const imminent = due.minutes !== null && due.minutes <= ruleSet.rules.imminentWithinMinutes;
-    const overrideReason = lowerDomain && imminent && commitment.priorityContext.consequence === "severe" && ruleSet.rules.severeConsequenceOverride
-      ? `Lower-domain work overrides the normal domain order because it is imminent (${due.label}) with severe consequence.`
-      : undefined;
-    const explanation = `${commitment.priorityContext.domain} contributes ${domainScore}; ${due.label} contributes ${due.score}; ${commitment.priorityContext.consequence} consequence contributes ${consequence}; certainty contributes ${certainty}${blocked ? "; blocked state subtracts 150" : ""}.`;
-    return { commitment, score, explanation, overrideReason, dueBand: due.label };
+    const highConsequence = commitment.priorityContext.consequence === "high" || commitment.priorityContext.consequence === "severe";
+    const overrideEligible = ruleSet.rules.severeConsequenceOverride && lowerDomain && (imminent || highConsequence);
+    const normalDomainTier = domainIndex < 0 ? 0 : ruleSet.rules.domainOrder.length - domainIndex;
+    const effectiveDomainTier = overrideEligible ? ruleSet.rules.domainOrder.length : normalDomainTier;
+    const domainScore = effectiveDomainTier * DOMAIN_TIER_SCORE;
+    const score = domainScore + due.score + consequence + certainty + blocked;
+    const explanation = `${commitment.priorityContext.domain} contributes domain tier ${normalDomainTier}; ${due.label} contributes ${due.score}; ${commitment.priorityContext.consequence} consequence contributes ${consequence}; certainty contributes ${certainty}${blocked ? "; blocked state subtracts 150" : ""}.`;
+    return { commitment, domainIndex, score, explanation, overrideEligible, imminent, highConsequence, dueBand: due.label };
   }).sort((left, right) => right.score - left.score
     || (left.commitment.dueAt ?? "9999").localeCompare(right.commitment.dueAt ?? "9999")
     || left.commitment.id.localeCompare(right.commitment.id));
 
   return drafts.map((draft, index) => {
     const rank = index + 1;
+    const overridesHigherDomain = draft.overrideEligible && drafts.slice(index + 1).some((other) =>
+      other.domainIndex >= 0 && other.domainIndex < draft.domainIndex,
+    );
+    const overrideReason = overridesHigherDomain
+      ? `Lower-domain work overrides the normal domain order because ${[
+          draft.imminent ? `it is imminent (${draft.dueBand})` : "",
+          draft.highConsequence ? `it has ${draft.commitment.priorityContext.consequence} consequence` : "",
+        ].filter(Boolean).join(" and ")}.`
+      : undefined;
     const inputDigest = digest({
       commitmentId: draft.commitment.id,
       commitmentVersion: draft.commitment.version,
@@ -53,6 +65,7 @@ export function evaluatePriorityRows(
       judgmentPolicyVersion,
       rank,
       score: draft.score,
+      overrideReason: overrideReason ?? null,
     });
     return {
       id: `${draft.commitment.owner.feedId}:${draft.commitment.owner.cardId}`,
@@ -61,7 +74,7 @@ export function evaluatePriorityRows(
       rank,
       score: draft.score,
       explanation: draft.explanation,
-      ...(draft.overrideReason ? { overrideReason: draft.overrideReason } : {}),
+      ...(overrideReason ? { overrideReason } : {}),
       ruleSetId: ruleSet.id,
       ruleVersion: ruleSet.version,
       judgmentPolicyVersion,

@@ -5,6 +5,11 @@ function label(state: SourceCoverage["state"]): string {
   return value[0]?.toUpperCase() + value.slice(1);
 }
 
+function identity(value: SourceCoverage["expectedIdentity"]): string {
+  if (!value || Object.keys(value).length === 0) return "Not observed";
+  return Object.entries(value).map(([key, part]) => `${key}: ${part}`).join(" · ");
+}
+
 export function CoverageView({ coverage }: { coverage: WorkspaceCoverage }) {
   return (
     <main className="control-page" aria-labelledby="coverage-title">
@@ -21,6 +26,8 @@ export function CoverageView({ coverage }: { coverage: WorkspaceCoverage }) {
             <header><div><span>{source.provider?.replaceAll("_", " ") ?? "Unconfigured"}</span><h2>{source.name}</h2></div><b>{label(source.state)}</b></header>
             <dl>
               <div><dt>Required</dt><dd>{source.required ? "Yes" : "No"}</dd></div>
+              <div><dt>Expected identity</dt><dd>{identity(source.expectedIdentity)}</dd></div>
+              <div><dt>Observed identity</dt><dd>{identity(source.observedIdentity)}</dd></div>
               <div><dt>Last attempt</dt><dd>{source.lastAttemptAt ?? "Never"}</dd></div>
               <div><dt>Last good</dt><dd>{source.lastGoodAt ?? "None"}</dd></div>
               <div><dt>Age</dt><dd>{source.ageMinutes === null ? "Unknown" : `${source.ageMinutes} min`}</dd></div>

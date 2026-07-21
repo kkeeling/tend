@@ -131,6 +131,7 @@ describe("provider-neutral connector verification", () => {
     const configured = await domain.configureSourceProfile("inbox", source.id, profile("slack", { account: "user-a", workspace: "workspace-a" }));
     expect(configured.profile).toMatchObject({ provider: "slack", expectedIdentity: { account: "user-a", workspace: "workspace-a" } });
     await expect(domain.configureSourceProfile("inbox", source.id, profile("granola", { account: "user-a" }, ["read", "write"]))).rejects.toThrow("read-only");
+    await expect(domain.configureSourceProfile("inbox", source.id, { ...profile("slack", { account: "user-a" }), provider: "untrusted" as never })).rejects.toThrow("provider is unsupported");
     await domain.configureSourceProfile("inbox", source.id, profile("granola", { account: "user-a" }, ["read"]));
     await expect(domain.upsertCard("inbox", {
       id: "invalid-granola-write",
@@ -146,6 +147,30 @@ describe("provider-neutral connector verification", () => {
         execution: { provider: "granola", operation: "write", sourceId: source.id },
       }],
     })).rejects.toThrow("offer preparation instead of an outbound CTA");
+  });
+
+  test("rejects malformed connector identity values before persistence", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "tend-connector-invalid-identity-"));
+    roots.push(root);
+    const store = new AttentionStore(root);
+    await store.init();
+    const domain = new AttentionDomain(store);
+    const source = await domain.addSourceFromBrief("inbox", "Mailbox source");
+    await expect(domain.configureSourceProfile("inbox", source.id, {
+      provider: "gmail",
+      expectedIdentity: { account: 42 as never },
+      required: true,
+      cadenceMinutes: 15,
+      freshnessMinutes: 30,
+      lookbackDays: 30,
+      onboardingState: "connected",
+      actionCapabilities: ["read"],
+    })).rejects.toThrow("identity account must be a string");
+    expect(() => requirementFromPolicy({
+      provider: "gmail",
+      operation: "send_reply",
+      expectedIdentity: { ["__proto__"]: "unsafe" } as never,
+    })).toThrow("unsafe field");
   });
 
   test("binds an Outlook send to the claimed nonce and freshly current owning evidence", async () => {

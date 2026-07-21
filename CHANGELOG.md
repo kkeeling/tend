@@ -17,6 +17,25 @@ a promise of ongoing maintenance.
   across the shared types, mobile projection, Swift models, and iOS controls, swipes, and activity.
 - Advance the CLI contract to `0.4` with the clearer, intentionally breaking card disposition names.
 
+## 0.3.0-keeling.1 - 2026-07-21
+
+- Add the cross-feed `/now`, `/coverage`, and `/priority-ledger` control-plane surfaces while
+  preserving feed-owned cards, card-scoped chat, editable artifacts, and exact approval actions.
+- Add durable source profiles and attempt receipts with identity, scope, completeness, freshness,
+  and explicit degraded states so incomplete coverage cannot appear as an all-clear.
+- Add canonical commitments, reversible cross-source signal reconciliation, explicit-versus-implied
+  promise handling, lifecycle history, split/relink correction primitives, and a bundled KTD15
+  quality gate without weakening feed-local source-run provenance.
+- Add deterministic priority rules, approval-gated rule changes, and an append-only evaluation
+  ledger with human-readable explanations and replayable rule/judgment versions.
+- Generalize connector identity verification with named `trusted_adapter`,
+  `agent_host_observed`, and `prepare_only` assurance; recheck owning-card evidence during
+  `action:verify` and keep legacy Gmail approvals compatible.
+- Add a separate, bounded, read-only `tend-imessage-helper` and package it beside the main binary;
+  the helper fails closed when macOS Full Disk Access is absent, round-trips an exact timestamp/row
+  watermark, and exposes no mutation command.
+- Advance the SQLite schema to `17` and the CLI contract to `0.5`.
+
 ## 0.2.0 - 2026-07-06
 
 - Fix the public product name as Tend, consolidate runtime and agent operations under one `tend`

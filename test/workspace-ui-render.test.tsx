@@ -77,10 +77,53 @@ test("Now renders the existing editable card and exact CTA with composite identi
   expect(html).toContain("Due today and high consequence.");
 });
 
+test("Now exposes safe multi-source commitment provenance", () => {
+  const commitmentControl: WorkspaceControlPlane = {
+    ...control,
+    now: {
+      ...control.now,
+      items: [{
+        ...control.now.items[0],
+        commitment: {
+          id: "commitment-1",
+          version: 2,
+          deduplicationKey: "launch-brief",
+          owner: { feedId: card.feedId, cardId: card.id },
+          promise: "Send the launch brief",
+          certainty: 0.98,
+          status: "open",
+          priorityContext: { domain: "primary-work", consequence: "high" },
+          signals: [{
+            id: "signal-1",
+            candidateId: "candidate-1",
+            feedId: "meetings",
+            sourceId: "granola-notes",
+            sourceRunId: "run-1",
+            snapshotId: "snapshot-1",
+            kind: "meeting_note",
+            observedAt: "2026-07-21T17:00:00.000Z",
+            certainty: 0.98,
+            explicitness: "explicit_first_person_bounded",
+          }],
+          createdAt: "2026-07-21T17:00:00.000Z",
+          updatedAt: "2026-07-21T17:00:00.000Z",
+        },
+      }],
+    },
+  };
+  const html = renderToStaticMarkup(<NowView control={commitmentControl} activeId="mailbox-work-a:reply-card" {...handlers} />);
+  expect(html).toContain("Inspect provenance");
+  expect(html).toContain("meeting note");
+  expect(html).toContain("meetings / granola-notes");
+  expect(html).not.toContain("run-1");
+});
+
 test("Coverage names the blind spot and never renders all-clear copy while degraded", () => {
   const html = renderToStaticMarkup(<CoverageView coverage={control.coverage} />);
   expect(html).toContain("Permission denied");
   expect(html).toContain("Grant the required read permission");
+  expect(html).toContain("Expected identity");
+  expect(html).toContain("account: mailbox-work-a");
   expect(html).not.toContain("All required sources are fresh");
 });
 

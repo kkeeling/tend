@@ -79,6 +79,10 @@ Run `tend cli help` for the full command surface. Core feed-runner commands are:
 | Operation | CLI command |
 | --- | --- |
 | Read workspace | `tend cli state --feed <feed>` |
+| Read ranked cross-feed attention | `tend cli workspace:now` |
+| Read source coverage | `tend cli workspace:coverage` |
+| Read priority rules and ledger | `tend cli workspace:priority` |
+| Route chat to a Now card owner | `tend cli workspace:instruct --feed <owner-feed> --card <owner-card> --instruction <text>` |
 | Inspect feed setup | `tend cli inspect --feed <feed>` |
 | Detect Monologue | `tend cli setup:detect-monologue` |
 | Bind Chronicle publisher | `tend cli context:bind --thread <thread>` |
@@ -96,6 +100,15 @@ Run `tend cli help` for the full command surface. Core feed-runner commands are:
 | Remove source | `tend cli source:remove --feed <feed> --source <source>` |
 | Record complete/no-change source run | `tend cli source:record-run --feed <feed> --source <source> --snapshots <json> --judgments <json> --checkpoint <json> --collection-proof-file <proof.json> [--context-use-file <path>]` |
 | Record failed/partial source attempt | `tend cli source:attempt:record --feed <feed> --source <source> --outcome <outcome> [--observed-identity-file <identity.json>]` |
+| Record a commitment candidate | `tend cli commitment:candidate:record --feed <feed> --candidate-file <candidate.json>` |
+| Confirm or reject a candidate | `tend cli commitment:candidate:confirm --candidate <candidate> --accept` or `--reject` |
+| Split a mistaken auto-merge | `tend cli commitment:candidate:split --candidate <candidate> --deduplication-key <new-key> --reason <text>` |
+| Relink a signal | `tend cli commitment:candidate:relink --candidate <candidate> --commitment <target> --reason <text>` |
+| Transition a commitment | `tend cli commitment:transition --commitment <commitment> --status <lifecycle> --reason <text>` |
+| Materialize current priority | `tend cli priority:evaluate` |
+| Activate initial approved rules | `tend cli priority:rules:activate --rules <json> --reason <text>` |
+| Record a priority correction | `tend cli priority:correction --preferred <commitment> --over <commitment> --reason <text> --rules <json>` |
+| Approve an exact rule proposal | `tend cli priority:proposal:approve --proposal <proposal>` |
 | Record sweep batch | `tend cli sweep:record-batch --feed <feed> --runs <json-array> [--context <mind-update-id>]` |
 | Record sweep rejudgment | `tend cli sweep:rejudge --feed <feed> --feedback <id> --ordered-cards <json-array> --removed-cards <json-array>` |
 | Upsert card | `tend cli card:upsert --feed <feed> --card <json>` |

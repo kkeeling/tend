@@ -17,8 +17,8 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-function appleNanoseconds(iso: string): number {
-  return Math.round((Date.parse(iso) / 1_000 - APPLE_EPOCH_SECONDS) * 1_000_000_000);
+function appleNanoseconds(iso: string): string {
+  return ((BigInt(Date.parse(iso)) - BigInt(APPLE_EPOCH_SECONDS) * 1_000n) * 1_000_000n).toString();
 }
 
 async function syntheticMessagesDatabase(): Promise<{ root: string; filename: string }> {
@@ -100,8 +100,45 @@ describe("dedicated read-only iMessage helper", () => {
         textUnavailable: true,
       },
     ]);
+    expect(result.nextWatermark).toEqual({ appleDate: appleNanoseconds("2026-07-21T17:05:00.000Z"), rowId: 2 });
     expect(JSON.stringify(result)).not.toContain(filename);
     expect(JSON.stringify(result)).not.toContain("attachment");
+  });
+
+  test("preserves nanosecond-scale SQLite timestamps as exact decimal strings", async () => {
+    const { filename } = await syntheticMessagesDatabase();
+    const database = new Database(filename);
+    const exact = "806518800123456789";
+    database.query("INSERT INTO message VALUES (?, ?, ?, ?, ?, ?, ?)").run(3, "message-guid-3", "Exact timestamp", exact, 0, "iMessage", 1);
+    database.exec("INSERT INTO chat_message_join VALUES (1, 3);");
+    database.close();
+
+    const result = collectIMessageReadOnly({ since: "2026-07-21T16:55:00.000Z", limit: 10 }, {
+      databasePath: filename,
+      now: new Date("2026-07-21T18:00:00.000Z"),
+    });
+    expect(result.nextWatermark).toEqual({ appleDate: exact, rowId: 3 });
+  });
+
+  test("resumes strictly after the exact timestamp and row watermark", async () => {
+    const { filename } = await syntheticMessagesDatabase();
+    const database = new Database(filename);
+    const sharedTimestamp = appleNanoseconds("2026-07-21T17:05:00.000Z");
+    database.query("INSERT INTO message VALUES (?, ?, ?, ?, ?, ?, ?)").run(3, "message-guid-3", "Same timestamp, later row", sharedTimestamp, 0, "iMessage", 1);
+    database.exec("INSERT INTO chat_message_join VALUES (1, 3);");
+    database.close();
+
+    const result = collectIMessageReadOnly({
+      since: "2026-07-21T16:55:00.000Z",
+      after: { appleDate: sharedTimestamp, rowId: 2 },
+      limit: 10,
+    }, {
+      databasePath: filename,
+      now: new Date("2026-07-21T18:00:00.000Z"),
+    });
+
+    expect(result.messages.map((message) => message.id)).toEqual(["message-guid-3"]);
+    expect(result.scope.after).toEqual({ appleDate: sharedTimestamp, rowId: 2 });
   });
 
   test("maps Full Disk Access and schema failures to honest coverage outcomes", async () => {
@@ -149,6 +186,13 @@ describe("dedicated read-only iMessage helper", () => {
       now: new Date("2026-07-21T18:00:00.000Z"),
       openDatabase,
     })).toThrow("between 1 and 500");
+    expect(() => collectIMessageReadOnly({
+      since: "2026-07-21T17:00:00.000Z",
+      after: { appleDate: appleNanoseconds("2026-07-21T16:59:00.000Z"), rowId: 1 },
+    }, {
+      now: new Date("2026-07-21T18:00:00.000Z"),
+      openDatabase,
+    })).toThrow("cannot precede");
     expect(opened).toBe(false);
   });
 });

@@ -48,7 +48,7 @@ async function commitment(
     normalized: { promise, ...(context.dueAt ? { dueAt: context.dueAt } : {}) },
     priorityContext: { domain: context.domain, consequence: context.consequence },
     judgmentPolicyVersion: "commitment-v1",
-    sourceClass: "synthetic",
+    sourceClass: "meeting_notes",
     qualityGatePassed: true,
     ownerHint: { feedId },
   })).commitment!;
@@ -69,7 +69,15 @@ describe("priority rules and ledger", () => {
     expect(first).toEqual(second);
     expect(first[0]).toMatchObject({ commitmentId: primary.id, ruleVersion: rule.version });
     expect(first[0].explanation).toContain("primary-work");
-    expect((await store.listPriorityLedger()).filter((entry) => entry.type === "evaluation")).toHaveLength(2);
+    expect((await store.listPriorityLedger()).filter((entry) => entry.type === "evaluation")).toHaveLength(4);
+  });
+
+  test("refreshes the materialized ordering as commitments arrive and on workspace reads", async () => {
+    const { store, domain, primarySource, sideSource, primaryRun, sideRun } = await setup();
+    const primary = await commitment(domain, "primary-work", primarySource.id, primaryRun, "primary-auto-refresh", "Prepare launch brief", { domain: "primary-work", consequence: "medium" });
+    await commitment(domain, "side-project", sideSource.id, sideRun, "side-auto-refresh", "Review experiment", { domain: "side-project", consequence: "medium" });
+    expect((await store.readWorkspaceNowProjection())[0]).toMatchObject({ commitmentId: primary.id, judgmentPolicyVersion: "priority-v1" });
+    expect((await domain.refreshWorkspacePriorities())[0]).toMatchObject({ commitmentId: primary.id });
   });
 
   test("allows an imminent severe lower-domain item to override with a visible ledger reason", async () => {
@@ -84,6 +92,34 @@ describe("priority rules and ledger", () => {
     const rows = await domain.evaluateWorkspacePriorities("judgment-v1", now);
     expect(rows[0]).toMatchObject({ commitmentId: urgent.id, overrideReason: expect.stringContaining("imminent") });
     expect((await store.listPriorityLedger()).some((entry) => entry.type === "override" && entry.commitmentId === urgent.id)).toBe(true);
+  });
+
+  test("does not let ordinary due-date scoring bypass the approved domain order", async () => {
+    const { domain, primarySource, sideSource, primaryRun, sideRun } = await setup();
+    const primary = await commitment(domain, "primary-work", primarySource.id, primaryRun, "primary-normal-due", "Prepare launch brief", { domain: "primary-work", consequence: "medium" });
+    await commitment(domain, "side-project", sideSource.id, sideRun, "side-tomorrow", "Review tomorrow's experiment", {
+      domain: "side-project",
+      consequence: "medium",
+      dueAt: "2026-07-22T17:00:00.000Z",
+    });
+
+    const rows = await domain.evaluateWorkspacePriorities("judgment-v1", now);
+    expect(rows[0]).toMatchObject({ commitmentId: primary.id });
+    expect(rows.every((row) => row.overrideReason === undefined)).toBe(true);
+  });
+
+  test("allows high-consequence lower-domain work to override with a visible reason", async () => {
+    const { domain, primarySource, sideSource, primaryRun, sideRun } = await setup();
+    await commitment(domain, "primary-work", primarySource.id, primaryRun, "primary-high-override", "Prepare launch brief", { domain: "primary-work", consequence: "medium" });
+    const urgent = await commitment(domain, "side-project", sideSource.id, sideRun, "side-high-override", "Prevent customer data loss", {
+      domain: "side-project",
+      consequence: "high",
+    });
+
+    expect((await domain.evaluateWorkspacePriorities("judgment-v1", now))[0]).toMatchObject({
+      commitmentId: urgent.id,
+      overrideReason: expect.stringContaining("high consequence"),
+    });
   });
 
   test("keeps ordering unchanged until the exact correction proposal is approved", async () => {

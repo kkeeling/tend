@@ -78,6 +78,28 @@ describe("workspace source coverage", () => {
     expect(mismatched.sources[0]).toMatchObject({ state: "identity_mismatch", lastGoodAt: null });
   });
 
+  test("matches provider identities using the same case-normalized contract as action verification", () => {
+    const slack = source({
+      profile: {
+        ...source().profile!,
+        provider: "slack",
+        expectedIdentity: { account: "u0abc123", workspace: "t0workspace" },
+      },
+    });
+    const coverage = projectCoverage(
+      [{ feedId: "side-project", recipe: slack }],
+      [attempt({
+        feedId: "side-project",
+        sourceId: slack.id,
+        observedIdentity: { account: "U0ABC123", workspace: "T0WORKSPACE" },
+      })],
+      new Date(now),
+    );
+
+    expect(coverage.allClear).toBe(true);
+    expect(coverage.sources[0]).toMatchObject({ state: "fresh", lastGoodAt: expect.any(String) });
+  });
+
   test("preserves the last successful boundary while exposing the latest failure", () => {
     const coverage = projectCoverage(
       [{ feedId: "primary-work", recipe: source() }],
@@ -160,6 +182,26 @@ describe("workspace source coverage", () => {
       } finally {
         restarted.sqlite.close();
       }
+    } finally {
+      runtime.sqlite.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects incomplete successful proofs before advancing the checkpoint", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "tend-coverage-incomplete-"));
+    const runtime = await createLocalRuntime(path.join(root, "data"), path.join(root, "attention.db"));
+    try {
+      const domain = new AttentionDomain(runtime.store);
+      await runtime.store.addSource("inbox", source(), "# Work mailbox A\n");
+      const before = await runtime.store.readSourceCheckpoint("inbox", "mailbox-work-a");
+      await expect(domain.recordSourceRun("inbox", "mailbox-work-a", [], [], { cursor: "must-not-advance" }, undefined, undefined, {
+        outcome: "success",
+        observedIdentity: { account: "mailbox-work-a" },
+        completeness: { identityVerified: true } as SourceAttempt["completeness"],
+      })).rejects.toThrow("requires complete identity");
+      expect(await runtime.store.readSourceCheckpoint("inbox", "mailbox-work-a")).toEqual(before);
+      expect(await runtime.store.listSourceAttempts("inbox", "mailbox-work-a")).toHaveLength(0);
     } finally {
       runtime.sqlite.close();
       await rm(root, { recursive: true, force: true });

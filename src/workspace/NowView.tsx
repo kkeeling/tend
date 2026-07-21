@@ -51,6 +51,16 @@ export function NowView({
                   <span>{item.commitment.status.replaceAll("_", " ")}</span>
                   <b>{item.commitment.signals.length} source receipt{item.commitment.signals.length === 1 ? "" : "s"}</b>
                   {item.commitment.dueAt && <time dateTime={item.commitment.dueAt}>Due {new Date(item.commitment.dueAt).toLocaleString()}</time>}
+                  <details className="commitment-provenance">
+                    <summary>Inspect provenance</summary>
+                    <ul>{item.commitment.signals.map((signal) => (
+                      <li key={signal.id}>
+                        <b>{signal.kind.replaceAll("_", " ")}</b>
+                        <span>{signal.feedId} / {signal.sourceId}</span>
+                        <time dateTime={signal.observedAt}>{new Date(signal.observedAt).toLocaleString()}</time>
+                      </li>
+                    ))}</ul>
+                  </details>
                 </div>
               )}
               <CardView

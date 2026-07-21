@@ -5,6 +5,7 @@ import { api, post } from "./app/api";
 import { agentLabel, effectiveWorkLane } from "../shared/lanes";
 import type { AttentionScreen, Inspector, Tab, WorkspaceTab } from "./app/types";
 import { CardView } from "./feed/CardView";
+import { flushVisibleCardEdits } from "./feed/cardEdits";
 import { RoutineActionGroupView } from "./feed/RoutineActionGroupView";
 import { countFor, visibleCardActions, visibleCards, visibleFeedWork, visibleRoutineActions } from "./feed/selectors";
 import { Dock } from "./shell/Dock";
@@ -295,15 +296,6 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
     () => post(`/api/feeds/${work.feedId}/work/${work.id}/assignee`, { agent: "codex" }),
     "Reassigned to Codex",
   );
-  const flushVisibleCardEdits = async (card: Card) => {
-    const textareas = document.querySelectorAll<HTMLTextAreaElement>(`[data-card-id="${CSS.escape(card.id)}"] textarea[data-block-id]`);
-    await Promise.all(Array.from(textareas).map(async (textarea) => {
-      const blockId = textarea.dataset.blockId;
-      const block = card.blocks.find((item) => item.id === blockId);
-      if (!blockId || block?.type !== "editable_text" || textarea.value === (block.value ?? "")) return;
-      await post(`/api/feeds/${card.feedId}/cards/${card.id}/blocks/${blockId}`, { value: textarea.value });
-    }));
-  };
   const runCardAction = (card: Card, action: CardAction) => {
     if (!feed) return;
     void (async () => {

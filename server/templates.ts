@@ -211,6 +211,14 @@ checkpoint and evidence on every failure. ${credentialBoundary}
 Collection grants read authority only. Preparation and outbound action capabilities are separate.
 Never render or execute an outbound CTA unless the source profile explicitly includes the matching
 capability and the claimed provider-neutral execution grant can satisfy action:verify.
+
+For commitment candidates, use judgment policy \`commitment-v1\`. Automatic creation is authorized
+only when Tend's bundled KTD15 receipt validates this provider-derived source class and the language
+is an explicit first-person bounded promise. Send implied assignments, quoted promises, soft intent,
+and uncertain matches through the visible confirmation card. Never treat the caller-provided
+\`qualityGatePassed\` field as authority; Tend independently intersects it with the bundled gate.
+Give every distinct promise in a source snapshot a stable non-content \`sourceSignalKey\`; replay the
+same key on later passes even if its canonical commitment grouping is corrected.
 `,
   };
 }

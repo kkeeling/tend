@@ -66,7 +66,8 @@ import { actionDigest, cleanupDigest, configuredApprovalAction, requiredSourceMa
 import { queuedWork } from "./workflow/workItems";
 import { mobileActionConfirmation, projectMobileCard, projectMobileRoutineAction } from "./mobile/projection";
 import { assertCommitmentTransition } from "./workflow/commitments";
-import { evaluatePriorityRows } from "./workflow/priority";
+import { commitmentQualityGate, validatedCommitmentSourceClass } from "./workflow/commitmentQuality";
+import { DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION, evaluatePriorityRows } from "./workflow/priority";
 import {
   executionRequirementDigest,
   issueExecutionGrant,
@@ -1908,6 +1909,7 @@ export class AttentionDomain {
       const card = await this.store.readCard(feedId, cardId);
       const block = card.blocks.find((item) => item.id === blockId);
       if (!block || block.type !== "editable_text") throw new Error("Editable card block not found.");
+      if ((block.value ?? "") === value) return card;
       block.value = value;
       block.editable = true;
       appendHistory(card, "user.edited_artifact", blockId);
@@ -2752,6 +2754,14 @@ export class AttentionDomain {
   }
 
   async configureSourceProfile(feedId: string, sourceId: string, input: SourceProfile): Promise<SourceRecipe> {
+    const allowedProviders = new Set(["gmail", "outlook_email", "google_calendar", "outlook_calendar", "slack", "teams", "granola", "imessage", "custom"]);
+    const allowedOnboardingStates = new Set(["authorization_required", "connected", "paused", "disconnected"]);
+    if (!input || typeof input !== "object" || !allowedProviders.has(input.provider)) throw new Error("Source provider is unsupported.");
+    if (!allowedOnboardingStates.has(input.onboardingState)) throw new Error("Source onboardingState is unsupported.");
+    if (typeof input.required !== "boolean") throw new Error("Source required must be a boolean.");
+    if (!input.expectedIdentity || typeof input.expectedIdentity !== "object" || Array.isArray(input.expectedIdentity)) {
+      throw new Error("Source expectedIdentity must be an identity object.");
+    }
     if (!Number.isInteger(input.cadenceMinutes) || input.cadenceMinutes < 1) throw new Error("Source cadenceMinutes must be a positive integer.");
     if (!Number.isInteger(input.freshnessMinutes) || input.freshnessMinutes < 1) throw new Error("Source freshnessMinutes must be a positive integer.");
     if (!Number.isInteger(input.lookbackDays) || input.lookbackDays < 1) throw new Error("Source lookbackDays must be a positive integer.");
@@ -2951,11 +2961,29 @@ export class AttentionDomain {
       const feed = await this.store.readFeed(feedId);
       const source = feed.sources.find((item) => item.id === sourceId);
       if (!source) throw new Error(`Source recipe not found: ${sourceId}`);
+      if (collectionProof && (typeof collectionProof !== "object" || Array.isArray(collectionProof))) throw new Error("Source collection proof must be an object.");
+      if (collectionProof && !["success", "no_change"].includes(collectionProof.outcome)) throw new Error("Source collection proof outcome must be success or no_change.");
+      if (collectionProof && (!collectionProof.completeness || typeof collectionProof.completeness !== "object" || Array.isArray(collectionProof.completeness))) {
+        throw new Error("Source collection proof completeness must be an object.");
+      }
+      if (collectionProof?.startedAt && !Number.isFinite(Date.parse(collectionProof.startedAt))) throw new Error("Source collection proof startedAt must be an ISO date-time.");
+      const observedIdentity = collectionProof ? normalizeIdentity(collectionProof.observedIdentity) : undefined;
       if (source.profile && !collectionProof) throw new Error("Profiled sources require observed identity and completeness proof.");
-      if (source.profile && collectionProof && !sourceIdentityMatches(source.profile.expectedIdentity, collectionProof.observedIdentity)) {
+      if (source.profile && collectionProof && !sourceIdentityMatches(source.profile.expectedIdentity, observedIdentity!)) {
         throw new Error("Observed source identity does not match the configured profile.");
       }
-      if (source.profile && collectionProof && !Object.values(collectionProof.completeness).every((value) => value === true || typeof value === "string")) {
+      if (
+        source.profile
+        && collectionProof
+        && (
+          collectionProof.completeness.identityVerified !== true
+          || collectionProof.completeness.scopeVerified !== true
+          || collectionProof.completeness.permissionsComplete !== true
+          || collectionProof.completeness.paginationComplete !== true
+          || collectionProof.completeness.backfillComplete !== true
+          || (collectionProof.completeness.watermark !== undefined && typeof collectionProof.completeness.watermark !== "string")
+        )
+      ) {
         throw new Error("Successful source collection requires complete identity, scope, permissions, pagination, and backfill proof.");
       }
       if (triggerWorkId) await this.assertClaimedRecollectionWork(feedId, triggerWorkId);
@@ -2975,7 +3003,7 @@ export class AttentionDomain {
           outcome: collectionProof.outcome,
           startedAt: collectionProof.startedAt ?? completedAt,
           completedAt,
-          observedIdentity: collectionProof.observedIdentity,
+          observedIdentity: observedIdentity!,
           completeness: collectionProof.completeness,
           runId,
           ...(triggerWorkId ? { triggerWorkId } : {}),
@@ -3011,6 +3039,8 @@ export class AttentionDomain {
         "disconnected",
       ]);
       if (!allowedOutcomes.has(input.outcome)) throw new Error("Successful and no-change collections must be recorded as source runs with complete collection proof.");
+      if (input.startedAt && !Number.isFinite(Date.parse(input.startedAt))) throw new Error("Source attempt startedAt must be an ISO date-time.");
+      const observedIdentity = input.observedIdentity ? normalizeIdentity(input.observedIdentity) : undefined;
       const feed = await this.store.readFeed(feedId);
       if (!feed.sources.some((source) => source.id === sourceId)) throw new Error(`Source recipe not found: ${sourceId}`);
       if (input.triggerWorkId) await this.assertClaimedRecollectionWork(feedId, input.triggerWorkId);
@@ -3022,7 +3052,7 @@ export class AttentionDomain {
         outcome: input.outcome,
         startedAt: input.startedAt ?? completedAt,
         completedAt,
-        ...(input.observedIdentity ? { observedIdentity: input.observedIdentity } : {}),
+        ...(observedIdentity ? { observedIdentity } : {}),
         ...(input.triggerWorkId ? { triggerWorkId: input.triggerWorkId } : {}),
         checkpointAdvanced: false,
         ...(input.error ? { error: input.error } : {}),
@@ -3045,25 +3075,50 @@ export class AttentionDomain {
     return this.store.serializeAtomic(async () => {
       const promise = requiredMindText(input.normalized.promise, "Commitment promise", 500);
       const deduplicationKey = requiredMindText(input.deduplicationKey, "Commitment deduplication key", 240);
-      const sourceClass = requiredMindText(input.sourceClass, "Commitment source class", 80);
+      const requestedSourceClass = requiredMindText(input.sourceClass, "Commitment source class", 80);
       const judgmentPolicyVersion = requiredMindText(input.judgmentPolicyVersion, "Commitment judgment policy version", 80);
       safeIdentifier(feedId, "Feed id");
       safeIdentifier(input.sourceId, "Source id");
       safeIdentifier(input.sourceRunId, "Source run id");
       safeIdentifier(input.snapshotId, "Snapshot id");
+      if (input.sourceSignalKey) safeIdentifier(input.sourceSignalKey, "Commitment source signal key");
       safeIdentifier(input.ownerHint.feedId, "Commitment owner feed id");
+      if (input.ownerHint.cardId) safeIdentifier(input.ownerHint.cardId, "Commitment owner card id");
+      if (!["explicit_first_person_bounded", "implied", "ambiguous"].includes(input.explicitness)) {
+        throw new Error("Commitment explicitness is unsupported.");
+      }
+      if (!["email", "calendar", "slack", "teams", "meeting_note", "message", "custom"].includes(input.signalKind)) {
+        throw new Error("Commitment signal kind is unsupported.");
+      }
       if (!Number.isFinite(input.certainty) || input.certainty < 0 || input.certainty > 1) throw new Error("Commitment certainty must be between 0 and 1.");
       if (input.normalized.dueAt && !Number.isFinite(Date.parse(input.normalized.dueAt))) throw new Error("Commitment dueAt must be an ISO date-time.");
+      if (input.priorityContext) {
+        requiredMindText(input.priorityContext.domain, "Commitment priority domain", 100);
+        if (!["low", "medium", "high", "severe"].includes(input.priorityContext.consequence)) {
+          throw new Error("Commitment consequence is unsupported.");
+        }
+        if (input.priorityContext.blocked !== undefined && typeof input.priorityContext.blocked !== "boolean") {
+          throw new Error("Commitment blocked state must be a boolean.");
+        }
+      }
       await this.store.readConfig(input.ownerHint.feedId);
       const run = await this.store.readRun(feedId, input.sourceRunId);
       if (run.sourceId !== input.sourceId) throw new Error("Commitment candidate source does not match its source run.");
+      const source = (await this.store.readFeed(feedId)).sources.find((item) => item.id === input.sourceId);
+      const sourceClass = validatedCommitmentSourceClass(source?.profile?.provider, requestedSourceClass);
+      const qualityGate = commitmentQualityGate(sourceClass, judgmentPolicyVersion);
       const snapshotMatch = /^snapshot-(\d+)$/.exec(input.snapshotId);
       if (!snapshotMatch || Number(snapshotMatch[1]) < 1 || Number(snapshotMatch[1]) > run.snapshots) {
         throw new Error("Commitment candidate snapshot is not present in its source run.");
       }
 
-      const signalId = `${feedId}:${input.sourceRunId}:${input.snapshotId}`;
-      const replay = (await this.store.listCommitmentCandidates()).find((item) => item.signal.id === signalId && item.deduplicationKey === deduplicationKey);
+      const legacySignalId = `${feedId}:${input.sourceRunId}:${input.snapshotId}`;
+      const sourceSignalKey = input.sourceSignalKey ?? digest({ deduplicationKey, promise }).slice(0, 24);
+      const signalId = `${legacySignalId}:${sourceSignalKey}`;
+      const replay = (await this.store.listCommitmentCandidates()).find((item) =>
+        item.signal.id === signalId
+        || (item.signal.id === legacySignalId && item.deduplicationKey === deduplicationKey),
+      );
       if (replay) {
         return {
           candidate: replay,
@@ -3072,13 +3127,16 @@ export class AttentionDomain {
       }
 
       const createdAt = isoNow();
+      const candidateId = makeId("candidate");
       const candidate: CommitmentCandidate = {
-        id: makeId("candidate"),
+        id: candidateId,
         feedId,
         ...input,
         deduplicationKey,
         sourceClass,
         judgmentPolicyVersion,
+        qualityGatePassed: input.qualityGatePassed && qualityGate.passed,
+        qualityGate,
         normalized: {
           promise,
           ...(input.normalized.deliverable ? { deliverable: requiredMindText(input.normalized.deliverable, "Commitment deliverable", 500) } : {}),
@@ -3087,6 +3145,7 @@ export class AttentionDomain {
         },
         signal: {
           id: signalId,
+          candidateId,
           feedId,
           sourceId: input.sourceId,
           sourceRunId: input.sourceRunId,
@@ -3100,7 +3159,7 @@ export class AttentionDomain {
         createdAt,
       };
 
-      const canAutoCreate = input.explicitness === "explicit_first_person_bounded" && input.qualityGatePassed;
+      const canAutoCreate = candidate.explicitness === "explicit_first_person_bounded" && candidate.qualityGatePassed;
       if (!canAutoCreate) {
         const cardId = `confirm-${candidate.id}`;
         candidate.confirmationCard = { feedId: input.ownerHint.feedId, cardId };
@@ -3114,6 +3173,7 @@ export class AttentionDomain {
       candidate.commitmentId = commitment.id;
       candidate.decidedAt = isoNow();
       await this.store.writeCommitmentCandidate(candidate);
+      await this.refreshWorkspacePrioritiesLocked();
       return { candidate, commitment };
     });
   }
@@ -3149,6 +3209,7 @@ export class AttentionDomain {
         card.completionDisposition = "completed";
         await this.store.writeCard(card);
       }
+      await this.refreshWorkspacePrioritiesLocked();
       return { candidate, commitment };
     });
   }
@@ -3183,7 +3244,53 @@ export class AttentionDomain {
         }
         await this.store.writeCard(card);
       }
+      await this.refreshWorkspacePrioritiesLocked();
       return commitment;
+    });
+  }
+
+  async splitCommitmentCandidate(
+    candidateId: string,
+    input: { deduplicationKey: string; reason: string; ownerFeedId?: string },
+  ): Promise<{ source: WorkspaceCommitment; target: WorkspaceCommitment; candidate: CommitmentCandidate }> {
+    return this.store.serializeAtomic(async () => {
+      const candidate = await this.store.readCommitmentCandidate(candidateId);
+      if (!candidate.commitmentId) throw new Error("Only a linked commitment candidate can be split.");
+      const source = await this.store.readWorkspaceCommitment(candidate.commitmentId);
+      const deduplicationKey = requiredMindText(input.deduplicationKey, "Split commitment deduplication key", 240);
+      if (deduplicationKey === source.deduplicationKey) throw new Error("A split requires a new commitment deduplication key.");
+      if (await this.store.findWorkspaceCommitmentByKey(deduplicationKey)) {
+        throw new Error("That commitment key already exists; relink the candidate to the existing commitment instead.");
+      }
+      const ownerFeedId = input.ownerFeedId
+        ? requiredMindText(input.ownerFeedId, "Split commitment owner feed", 100)
+        : source.owner.feedId;
+      safeIdentifier(ownerFeedId, "Split commitment owner feed");
+      await this.store.readConfig(ownerFeedId);
+      const target = await this.createCommitmentForCandidate(candidate, deduplicationKey, { feedId: ownerFeedId });
+      const moved = await this.moveCommitmentCandidate(candidate, source, target, input.reason, "split");
+      await this.refreshWorkspacePrioritiesLocked();
+      return moved;
+    });
+  }
+
+  async relinkCommitmentCandidate(
+    candidateId: string,
+    targetCommitmentId: string,
+    reason: string,
+  ): Promise<{ source: WorkspaceCommitment; target: WorkspaceCommitment; candidate: CommitmentCandidate }> {
+    return this.store.serializeAtomic(async () => {
+      const candidate = await this.store.readCommitmentCandidate(candidateId);
+      if (!candidate.commitmentId) throw new Error("Only a linked commitment candidate can be relinked.");
+      if (candidate.commitmentId === targetCommitmentId) throw new Error("The candidate is already linked to that commitment.");
+      const source = await this.store.readWorkspaceCommitment(candidate.commitmentId);
+      const target = await this.store.readWorkspaceCommitment(targetCommitmentId);
+      if (["fulfilled", "withdrawn"].includes(target.status) || (target.status === "superseded" && target.signals.length > 0)) {
+        throw new Error("Commitment signals can only be relinked to an active commitment or an empty commitment superseded by a prior correction.");
+      }
+      const moved = await this.moveCommitmentCandidate(candidate, source, target, reason, "relink");
+      await this.refreshWorkspacePrioritiesLocked();
+      return moved;
     });
   }
 
@@ -3199,7 +3306,24 @@ export class AttentionDomain {
       eyebrow: "Commitment confirmation",
       why: candidate.qualityGatePassed ? "The source language is ambiguous." : "This source class has not passed the automatic extraction quality gate.",
       blocks: [{ id: "candidate", type: "clarification", label: "Confirm or reject", text: candidate.normalized.promise }],
-      actions: [],
+      actions: [
+        {
+          id: "accept-commitment",
+          label: "Yes, add this commitment",
+          behavior: "queue_instruction",
+          instruction: `Confirm commitment candidate ${candidate.id} with \`commitment:candidate:confirm --candidate ${candidate.id} --accept\`, then report the canonical commitment and owner card.`,
+          variant: "primary",
+          shortcut: "y",
+        },
+        {
+          id: "reject-commitment",
+          label: "No, reject this commitment",
+          behavior: "queue_instruction",
+          instruction: `Reject commitment candidate ${candidate.id} with \`commitment:candidate:confirm --candidate ${candidate.id} --reject\`, then report that no authoritative commitment was created.`,
+          variant: "secondary",
+          shortcut: "n",
+        },
+      ],
       readyForPass: config.currentPass,
       createdAt: now,
       updatedAt: now,
@@ -3210,43 +3334,7 @@ export class AttentionDomain {
   private async linkCandidateToCommitment(candidate: CommitmentCandidate): Promise<WorkspaceCommitment> {
     let commitment = await this.store.findWorkspaceCommitmentByKey(candidate.deduplicationKey);
     if (!commitment) {
-      const ownerFeedId = candidate.ownerHint.feedId;
-      const ownerCardId = candidate.ownerHint.cardId ?? `commitment-${digest(candidate.deduplicationKey).slice(0, 20)}`;
-      const now = isoNow();
-      commitment = {
-        id: makeId("commitment"),
-        version: 1,
-        deduplicationKey: candidate.deduplicationKey,
-        owner: { feedId: ownerFeedId, cardId: ownerCardId },
-        promise: candidate.normalized.promise,
-        ...(candidate.normalized.deliverable ? { deliverable: candidate.normalized.deliverable } : {}),
-        ...(candidate.normalized.dueAt ? { dueAt: candidate.normalized.dueAt } : {}),
-        certainty: candidate.certainty,
-        status: "open",
-        priorityContext: candidate.priorityContext ?? { domain: ownerFeedId, consequence: "medium" },
-        signals: [],
-        createdAt: now,
-        updatedAt: now,
-      };
-      await this.store.writeWorkspaceCommitment(commitment);
-      await this.store.appendCommitmentEvent({ id: makeId("commitment-event"), commitmentId: commitment.id, type: "created", at: now, detail: { owner: commitment.owner } });
-      const config = await this.store.readConfig(ownerFeedId);
-      await this.store.writeCard({
-        id: ownerCardId,
-        feedId: ownerFeedId,
-        kind: "attention",
-        status: "to_review_new",
-        title: commitment.promise,
-        eyebrow: "Commitment",
-        why: "An explicit first-person bounded promise was captured from a validated source class.",
-        commitmentId: commitment.id,
-        blocks: [{ id: "commitment", type: "memo", label: "Promise", text: commitment.promise }],
-        actions: [],
-        readyForPass: config.currentPass,
-        createdAt: now,
-        updatedAt: now,
-        history: [],
-      });
+      commitment = await this.createCommitmentForCandidate(candidate, candidate.deduplicationKey, candidate.ownerHint);
     }
 
     if (!commitment.signals.some((signal) => signal.id === candidate.signal.id)) {
@@ -3276,6 +3364,135 @@ export class AttentionDomain {
     return commitment;
   }
 
+  private async createCommitmentForCandidate(
+    candidate: CommitmentCandidate,
+    deduplicationKey: string,
+    ownerHint: { feedId: string; cardId?: string },
+  ): Promise<WorkspaceCommitment> {
+    const ownerFeedId = ownerHint.feedId;
+    const ownerCardId = ownerHint.cardId ?? `commitment-${digest(deduplicationKey).slice(0, 20)}`;
+    const now = isoNow();
+    const existingOwnerCard = await this.store.hasCard(ownerFeedId, ownerCardId)
+      ? await this.store.readCard(ownerFeedId, ownerCardId)
+      : null;
+    if (existingOwnerCard?.commitmentId) throw new Error("The selected owner card already belongs to another commitment.");
+    const commitment: WorkspaceCommitment = {
+      id: makeId("commitment"),
+      version: 1,
+      deduplicationKey,
+      owner: { feedId: ownerFeedId, cardId: ownerCardId },
+      promise: candidate.normalized.promise,
+      ...(candidate.normalized.deliverable ? { deliverable: candidate.normalized.deliverable } : {}),
+      ...(candidate.normalized.dueAt ? { dueAt: candidate.normalized.dueAt } : {}),
+      certainty: candidate.certainty,
+      status: "open",
+      priorityContext: candidate.priorityContext ?? { domain: ownerFeedId, consequence: "medium" },
+      signals: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    await this.store.writeWorkspaceCommitment(commitment);
+    await this.store.appendCommitmentEvent({ id: makeId("commitment-event"), commitmentId: commitment.id, type: "created", at: now, detail: { owner: commitment.owner } });
+    if (existingOwnerCard) {
+      await this.store.writeCard({ ...existingOwnerCard, commitmentId: commitment.id, updatedAt: now });
+    } else {
+      const config = await this.store.readConfig(ownerFeedId);
+      await this.store.writeCard({
+        id: ownerCardId,
+        feedId: ownerFeedId,
+        kind: "attention",
+        status: "to_review_new",
+        title: commitment.promise,
+        eyebrow: "Commitment",
+        why: "An explicit first-person bounded promise was captured from a validated source class.",
+        commitmentId: commitment.id,
+        blocks: [{ id: "commitment", type: "memo", label: "Promise", text: commitment.promise }],
+        actions: [],
+        readyForPass: config.currentPass,
+        createdAt: now,
+        updatedAt: now,
+        history: [],
+      });
+    }
+    return commitment;
+  }
+
+  private async moveCommitmentCandidate(
+    candidate: CommitmentCandidate,
+    source: WorkspaceCommitment,
+    target: WorkspaceCommitment,
+    reason: string,
+    operation: "split" | "relink",
+  ): Promise<{ source: WorkspaceCommitment; target: WorkspaceCommitment; candidate: CommitmentCandidate }> {
+    const normalizedReason = requiredMindText(reason, "Commitment link correction reason", 500);
+    if (!source.signals.some((signal) => signal.id === candidate.signal.id)) {
+      throw new Error("The candidate signal is no longer linked to its recorded commitment.");
+    }
+    const at = isoNow();
+    const sourceVersion = source.version;
+    source.signals = source.signals.filter((signal) => signal.id !== candidate.signal.id);
+    source.version += 1;
+    source.updatedAt = at;
+    if (source.signals.length === 0) source.status = "superseded";
+    await this.store.writeWorkspaceCommitment(source, sourceVersion);
+
+    if (!target.signals.some((signal) => signal.id === candidate.signal.id)) {
+      const targetVersion = target.version;
+      target.signals = [...target.signals, candidate.signal];
+      target.certainty = Math.max(target.certainty, candidate.certainty);
+      if (target.status === "superseded" && target.signals.length === 1) target.status = "reopened";
+      target.version += 1;
+      target.updatedAt = at;
+      await this.store.writeWorkspaceCommitment(target, targetVersion);
+    }
+    candidate.commitmentId = target.id;
+    candidate.decidedAt = at;
+    await this.store.writeCommitmentCandidate(candidate);
+
+    await this.store.appendCommitmentEvent({
+      id: makeId("commitment-event"),
+      commitmentId: source.id,
+      type: operation === "split" ? "split" : "signal_relinked",
+      at,
+      detail: { candidateId: candidate.id, signalId: candidate.signal.id, toCommitmentId: target.id, reason: normalizedReason },
+    });
+    await this.store.appendCommitmentEvent({
+      id: makeId("commitment-event"),
+      commitmentId: target.id,
+      type: operation === "split" ? "split" : "signal_relinked",
+      at,
+      detail: { candidateId: candidate.id, signalId: candidate.signal.id, fromCommitmentId: source.id, reason: normalizedReason },
+    });
+    await this.syncCommitmentCardAfterSignalMove(source);
+    await this.syncCommitmentCardAfterSignalMove(target);
+    return { source, target, candidate };
+  }
+
+  private async syncCommitmentCardAfterSignalMove(commitment: WorkspaceCommitment): Promise<void> {
+    if (!(await this.store.hasCard(commitment.owner.feedId, commitment.owner.cardId))) return;
+    const card = await this.store.readCard(commitment.owner.feedId, commitment.owner.cardId);
+    card.blocks = [
+      ...card.blocks.filter((block) => block.id !== "source-receipts"),
+      ...(commitment.signals.length ? [{
+        id: "source-receipts",
+        type: "receipt" as const,
+        label: "Source receipts",
+        text: `${commitment.signals.length} attributable source receipt${commitment.signals.length === 1 ? "" : "s"}.`,
+      }] : []),
+    ];
+    if (commitment.status === "superseded") {
+      card.status = "done";
+      card.completedAt = commitment.updatedAt;
+      card.completionDisposition = "completed";
+    } else if (card.status === "done") {
+      card.status = "to_review_updated";
+      card.completedAt = undefined;
+      card.completionDisposition = undefined;
+    }
+    card.updatedAt = commitment.updatedAt;
+    await this.store.writeCard(card);
+  }
+
   async activateInitialPriorityRules(rules: PriorityRuleDefinition, reason: string): Promise<PriorityRuleSet> {
     return this.store.serializeAtomic(async () => {
       if (await this.store.readActivePriorityRuleSet()) throw new Error("An active priority rule set already exists; propose a correction instead.");
@@ -3292,46 +3509,64 @@ export class AttentionDomain {
       };
       await this.store.writePriorityRuleSet(ruleSet);
       await this.store.appendPriorityLedger({ id: makeId("priority-ledger"), type: "approval", at, ruleVersion: ruleSet.version, detail: { ruleSetId: ruleSet.id, reason: ruleSet.reason, rules: ruleSet.rules } });
+      await this.refreshWorkspacePrioritiesLocked(DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION);
       return ruleSet;
     });
   }
 
   async evaluateWorkspacePriorities(judgmentPolicyVersion: string, now = new Date()): Promise<WorkspaceNowRow[]> {
-    return this.store.serializeAtomic(async () => {
-      const policyVersion = requiredMindText(judgmentPolicyVersion, "Priority judgment policy version", 80);
-      const ruleSet = await this.store.readActivePriorityRuleSet();
-      if (!ruleSet) throw new Error("Priority rules are not configured; ordering is unavailable rather than model-guessed.");
-      const rows = evaluatePriorityRows(await this.store.listWorkspaceCommitments(), ruleSet, policyVersion, now);
-      const previous = await this.store.readWorkspaceNowProjection();
-      if (previous.length === rows.length && previous.every((row, index) => row.id === rows[index]?.id && row.inputDigest === rows[index]?.inputDigest)) return previous;
+    return this.store.serializeAtomic(() => this.evaluateWorkspacePrioritiesLocked(judgmentPolicyVersion, now));
+  }
 
-      const previousById = new Map(previous.map((row) => [row.id, row]));
-      for (const row of rows) {
-        if (previousById.get(row.id)?.inputDigest === row.inputDigest) continue;
+  async refreshWorkspacePriorities(
+    judgmentPolicyVersion = DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION,
+    now = new Date(),
+  ): Promise<WorkspaceNowRow[]> {
+    return this.store.serializeAtomic(() => this.refreshWorkspacePrioritiesLocked(judgmentPolicyVersion, now));
+  }
+
+  private async refreshWorkspacePrioritiesLocked(
+    judgmentPolicyVersion = DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION,
+    now = new Date(),
+  ): Promise<WorkspaceNowRow[]> {
+    if (!(await this.store.readActivePriorityRuleSet())) return this.store.readWorkspaceNowProjection();
+    return this.evaluateWorkspacePrioritiesLocked(judgmentPolicyVersion, now);
+  }
+
+  private async evaluateWorkspacePrioritiesLocked(judgmentPolicyVersion: string, now: Date): Promise<WorkspaceNowRow[]> {
+    const policyVersion = requiredMindText(judgmentPolicyVersion, "Priority judgment policy version", 80);
+    const ruleSet = await this.store.readActivePriorityRuleSet();
+    if (!ruleSet) throw new Error("Priority rules are not configured; ordering is unavailable rather than model-guessed.");
+    const rows = evaluatePriorityRows(await this.store.listWorkspaceCommitments(), ruleSet, policyVersion, now);
+    const previous = await this.store.readWorkspaceNowProjection();
+    if (previous.length === rows.length && previous.every((row, index) => row.id === rows[index]?.id && row.inputDigest === rows[index]?.inputDigest)) return previous;
+
+    const previousById = new Map(previous.map((row) => [row.id, row]));
+    for (const row of rows) {
+      if (previousById.get(row.id)?.inputDigest === row.inputDigest) continue;
+      await this.store.appendPriorityLedger({
+        id: makeId("priority-ledger"),
+        type: "evaluation",
+        at: row.evaluatedAt,
+        commitmentId: row.commitmentId,
+        ruleVersion: row.ruleVersion,
+        inputDigest: row.inputDigest,
+        detail: { rank: row.rank, score: row.score, explanation: row.explanation, judgmentPolicyVersion: row.judgmentPolicyVersion },
+      });
+      if (row.overrideReason) {
         await this.store.appendPriorityLedger({
           id: makeId("priority-ledger"),
-          type: "evaluation",
+          type: "override",
           at: row.evaluatedAt,
           commitmentId: row.commitmentId,
           ruleVersion: row.ruleVersion,
           inputDigest: row.inputDigest,
-          detail: { rank: row.rank, score: row.score, explanation: row.explanation, judgmentPolicyVersion: row.judgmentPolicyVersion },
+          detail: { rank: row.rank, reason: row.overrideReason },
         });
-        if (row.overrideReason) {
-          await this.store.appendPriorityLedger({
-            id: makeId("priority-ledger"),
-            type: "override",
-            at: row.evaluatedAt,
-            commitmentId: row.commitmentId,
-            ruleVersion: row.ruleVersion,
-            inputDigest: row.inputDigest,
-            detail: { rank: row.rank, reason: row.overrideReason },
-          });
-        }
       }
-      await this.store.replaceWorkspaceNowProjection(rows);
-      return rows;
-    });
+    }
+    await this.store.replaceWorkspaceNowProjection(rows);
+    return rows;
   }
 
   async recordPriorityCorrection(input: {
@@ -3388,6 +3623,7 @@ export class AttentionDomain {
       proposal.activatedRuleSetId = next.id;
       await this.store.writePriorityRuleProposal(proposal);
       await this.store.appendPriorityLedger({ id: makeId("priority-ledger"), type: "approval", at, ruleVersion: next.version, detail: { proposalId, ruleSetId: next.id, previousRuleSetId: active.id, rules: next.rules } });
+      await this.refreshWorkspacePrioritiesLocked(DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION);
       return next;
     });
   }

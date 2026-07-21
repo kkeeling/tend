@@ -11,9 +11,14 @@ export interface SourceAttemptRepository {
 }
 
 export class FileSourceAttemptRepository implements SourceAttemptRepository {
+  private readonly seenIds = new Map<string, Promise<Set<string>>>();
+  private readonly appendTails = new Map<string, Promise<void>>();
+
   constructor(private readonly dataDir: string) {}
 
-  async init(_feedIds: string[]): Promise<void> {}
+  async init(feedIds: string[]): Promise<void> {
+    await Promise.all(feedIds.map((feedId) => this.ids(feedId)));
+  }
 
   async list(feedId: string, sourceId?: string): Promise<SourceAttempt[]> {
     const file = this.file(feedId);
@@ -24,11 +29,25 @@ export class FileSourceAttemptRepository implements SourceAttemptRepository {
   }
 
   async append(attempt: SourceAttempt): Promise<void> {
-    const existing = await this.list(attempt.feedId);
-    if (existing.some((item) => item.id === attempt.id)) return;
-    const file = this.file(attempt.feedId);
-    await mkdir(path.dirname(file), { recursive: true });
-    await appendFile(file, `${JSON.stringify(attempt)}\n`, "utf8");
+    const previous = this.appendTails.get(attempt.feedId) ?? Promise.resolve();
+    const operation = previous.then(async () => {
+      const ids = await this.ids(attempt.feedId);
+      if (ids.has(attempt.id)) return;
+      const file = this.file(attempt.feedId);
+      await mkdir(path.dirname(file), { recursive: true });
+      await appendFile(file, `${JSON.stringify(attempt)}\n`, "utf8");
+      ids.add(attempt.id);
+    });
+    this.appendTails.set(attempt.feedId, operation.catch(() => undefined));
+    await operation;
+  }
+
+  private ids(feedId: string): Promise<Set<string>> {
+    const cached = this.seenIds.get(feedId);
+    if (cached) return cached;
+    const loaded = this.list(feedId).then((attempts) => new Set(attempts.map((attempt) => attempt.id)));
+    this.seenIds.set(feedId, loaded);
+    return loaded;
   }
 
   private file(feedId: string): string {

@@ -23,10 +23,10 @@ export function apiRoutes(context: LocalRouteContext): Hono {
   });
   app.get("/api/status", (c) => c.json({ ok: true, version: versionInfo(), dataDir, sqlite: sqlite.status() }));
   app.get("/api/state", async (c) => c.json(await store.readWorkspace(c.req.query("feed") ?? "inbox")));
-  app.get("/api/workspace", async (c) => c.json(await store.readWorkspaceControlPlane()));
-  app.get("/api/workspace/now", async (c) => c.json((await store.readWorkspaceControlPlane()).now));
-  app.get("/api/workspace/coverage", async (c) => c.json((await store.readWorkspaceControlPlane()).coverage));
-  app.get("/api/workspace/priority", async (c) => c.json((await store.readWorkspaceControlPlane()).priority));
+  app.get("/api/workspace", async (c) => { await domain.refreshWorkspacePriorities(); return c.json(await store.readWorkspaceControlPlane()); });
+  app.get("/api/workspace/now", async (c) => { await domain.refreshWorkspacePriorities(); return c.json((await store.readWorkspaceControlPlane()).now); });
+  app.get("/api/workspace/coverage", async (c) => { await domain.refreshWorkspacePriorities(); return c.json((await store.readWorkspaceControlPlane()).coverage); });
+  app.get("/api/workspace/priority", async (c) => { await domain.refreshWorkspacePriorities(); return c.json((await store.readWorkspaceControlPlane()).priority); });
   app.get("/api/health", (c) => c.json({ ok: true }));
   app.get("/api/mobile/status", (c) => c.json(mobileStatus?.() ?? { enabled: false }));
   app.get("/api/mind-context/current", async (c) => {
@@ -125,6 +125,22 @@ export function apiRoutes(context: LocalRouteContext): Hono {
     if (typeof input.accept !== "boolean") throw new Error("Commitment confirmation requires an explicit boolean accept value.");
     return domain.confirmCommitmentCandidate(c.req.param("candidate"), input.accept);
   }));
+  app.post("/api/workspace/commitment-candidates/:candidate/split", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.splitCommitmentCandidate(c.req.param("candidate"), {
+      deduplicationKey: String(input.deduplicationKey ?? ""),
+      reason: String(input.reason ?? ""),
+      ...(typeof input.ownerFeedId === "string" ? { ownerFeedId: input.ownerFeedId } : {}),
+    });
+  }));
+  app.post("/api/workspace/commitment-candidates/:candidate/relink", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.relinkCommitmentCandidate(
+      c.req.param("candidate"),
+      String(input.targetCommitmentId ?? ""),
+      String(input.reason ?? ""),
+    );
+  }));
   app.post("/api/workspace/priority/corrections", async (c) => mutation(c, notify, async () => {
     const input = await body(c);
     return domain.recordPriorityCorrection({
@@ -133,6 +149,12 @@ export function apiRoutes(context: LocalRouteContext): Hono {
       reason: String(input.reason ?? ""),
       proposedRules: input.proposedRules as PriorityRuleDefinition,
     });
+  }));
+  app.post("/api/workspace/priority/evaluate", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.refreshWorkspacePriorities(
+      typeof input.judgmentPolicyVersion === "string" ? input.judgmentPolicyVersion : undefined,
+    );
   }));
   app.post("/api/workspace/priority/proposals/:proposal/approve", async (c) => mutation(c, notify, async () => domain.approvePriorityRuleProposal(c.req.param("proposal"))));
   app.post("/api/revision-proposals/:proposal/apply", async (c) => mutation(c, notify, async () => domain.applyRevisionProposal(c.req.param("proposal"))));

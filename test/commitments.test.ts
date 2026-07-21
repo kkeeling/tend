@@ -95,6 +95,11 @@ describe("workspace commitments", () => {
     });
     expect(ambiguous.candidate.status).toBe("pending_confirmation");
     expect(ambiguous.commitment).toBeNull();
+    const confirmationCard = await store.readCard("primary-work", ambiguous.candidate.confirmationCard!.cardId);
+    expect(confirmationCard.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "accept-commitment", behavior: "queue_instruction", label: "Yes, add this commitment" }),
+      expect.objectContaining({ id: "reject-commitment", behavior: "queue_instruction", label: "No, reject this commitment" }),
+    ]));
 
     const gated = await domain.recordCommitmentCandidate("primary-work", {
       sourceId: primarySource.id,
@@ -113,9 +118,59 @@ describe("workspace commitments", () => {
     expect(gated.candidate.status).toBe("pending_confirmation");
     expect(await store.listWorkspaceCommitments()).toHaveLength(0);
 
+    const unvalidated = await domain.recordCommitmentCandidate("primary-work", {
+      sourceId: primarySource.id,
+      sourceRunId: primaryRun,
+      snapshotId: "snapshot-1",
+      signalKind: "custom",
+      deduplicationKey: "unvalidated-source-class",
+      explicitness: "explicit_first_person_bounded",
+      certainty: 0.99,
+      normalized: { promise: "Send the unvalidated appendix" },
+      judgmentPolicyVersion: "commitment-v1",
+      sourceClass: "unvalidated-source",
+      qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work" },
+    });
+    expect(unvalidated.candidate).toMatchObject({
+      status: "pending_confirmation",
+      qualityGatePassed: false,
+      qualityGate: { passed: false, evaluatedCases: 0 },
+    });
+
     const accepted = await domain.confirmCommitmentCandidate(ambiguous.candidate.id, true);
     expect(accepted.commitment?.status).toBe("open");
     expect((await store.readCommitmentCandidate(ambiguous.candidate.id)).status).toBe("accepted");
+  });
+
+  test("rejects unsafe owner ids and invalid agent-supplied commitment enums", async () => {
+    const { domain, primarySource, primaryRun } = await setup();
+    const base = {
+      sourceId: primarySource.id,
+      sourceRunId: primaryRun,
+      snapshotId: "snapshot-1",
+      signalKind: "meeting_note" as const,
+      deduplicationKey: "candidate-validation",
+      explicitness: "explicit_first_person_bounded" as const,
+      certainty: 0.99,
+      normalized: { promise: "Send the validated brief" },
+      judgmentPolicyVersion: "commitment-v1",
+      sourceClass: "meeting_notes",
+      qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work" },
+    };
+    await expect(domain.recordCommitmentCandidate("primary-work", {
+      ...base,
+      ownerHint: { feedId: "primary-work", cardId: "../outside" },
+    })).rejects.toThrow("owner card id");
+    await expect(domain.recordCommitmentCandidate("primary-work", {
+      ...base,
+      explicitness: "model_guessed" as never,
+    })).rejects.toThrow("explicitness is unsupported");
+    await expect(domain.recordCommitmentCandidate("primary-work", {
+      ...base,
+      priorityContext: { domain: "primary-work", consequence: "catastrophic" as never },
+    })).rejects.toThrow("consequence is unsupported");
   });
 
   test("keeps lifecycle history when completion is uncertain and later contradicted", async () => {
@@ -147,6 +202,101 @@ describe("workspace commitments", () => {
       "lifecycle_changed",
       "lifecycle_changed",
     ]);
+  });
+
+  test("enriches an existing owner card without replacing its draft or CTA", async () => {
+    const { store, domain, primarySource, primaryRun } = await setup();
+    await domain.upsertCard("primary-work", {
+      id: "existing-mail-card",
+      title: "Reply with the revised brief",
+      why: "The recipient is waiting for a promised update.",
+      blocks: [{ id: "draft", type: "editable_text", label: "Suggested reply", value: "Here is the revised brief." }],
+      actions: [{
+        id: "prepare-reply",
+        label: "Prepare reply",
+        behavior: "queue_instruction",
+        instruction: "Prepare the exact reply for review.",
+        variant: "primary",
+      }],
+    });
+
+    const recorded = await domain.recordCommitmentCandidate("primary-work", {
+      sourceId: primarySource.id,
+      sourceRunId: primaryRun,
+      snapshotId: "snapshot-1",
+      sourceSignalKey: "existing-card-promise",
+      signalKind: "email",
+      deduplicationKey: "existing-card-commitment",
+      explicitness: "explicit_first_person_bounded",
+      certainty: 0.99,
+      normalized: { promise: "Send the revised brief" },
+      judgmentPolicyVersion: "commitment-v1",
+      sourceClass: "email",
+      qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work", cardId: "existing-mail-card" },
+    });
+
+    const card = await store.readCard("primary-work", "existing-mail-card");
+    expect(card).toMatchObject({
+      title: "Reply with the revised brief",
+      commitmentId: recorded.commitment!.id,
+      actions: [expect.objectContaining({ id: "prepare-reply", behavior: "queue_instruction" })],
+    });
+    expect(card.blocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "draft", type: "editable_text", value: "Here is the revised brief." }),
+      expect.objectContaining({ id: "source-receipts", type: "receipt" }),
+    ]));
+  });
+
+  test("splits and relinks one attributable signal without losing provenance", async () => {
+    const { store, domain, primarySource, sideSource, primaryRun, sideRun } = await setup();
+    const normalized = { promise: "Send the revised launch brief", deliverable: "Revised launch brief" };
+    const first = await domain.recordCommitmentCandidate("primary-work", {
+      sourceId: primarySource.id, sourceRunId: primaryRun, snapshotId: "snapshot-1", signalKind: "meeting_note",
+      sourceSignalKey: "promise-1",
+      deduplicationKey: "reversible-merge", explicitness: "explicit_first_person_bounded", certainty: 0.98,
+      normalized, judgmentPolicyVersion: "commitment-v1", sourceClass: "meeting_notes", qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work" },
+    });
+    const second = await domain.recordCommitmentCandidate("side-project", {
+      sourceId: sideSource.id, sourceRunId: sideRun, snapshotId: "snapshot-1", signalKind: "email",
+      sourceSignalKey: "promise-2",
+      deduplicationKey: "reversible-merge", explicitness: "explicit_first_person_bounded", certainty: 0.96,
+      normalized, judgmentPolicyVersion: "commitment-v1", sourceClass: "email", qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work" },
+    });
+    expect(second.candidate.signal.candidateId).toBe(second.candidate.id);
+
+    const split = await domain.splitCommitmentCandidate(second.candidate.id, {
+      deduplicationKey: "revised-investor-brief",
+      reason: "This follow-up concerns a distinct deliverable.",
+    });
+    expect(split.source).toMatchObject({ id: first.commitment!.id, signals: [first.candidate.signal] });
+    expect(split.target.signals).toEqual([second.candidate.signal]);
+    expect(split.candidate.commitmentId).toBe(split.target.id);
+    expect((await store.listCommitmentEvents(split.source.id)).at(-1)).toMatchObject({ type: "split" });
+
+    const replay = await domain.recordCommitmentCandidate("side-project", {
+      sourceId: sideSource.id, sourceRunId: sideRun, snapshotId: "snapshot-1", signalKind: "email",
+      sourceSignalKey: "promise-2",
+      deduplicationKey: "reversible-merge", explicitness: "explicit_first_person_bounded", certainty: 0.96,
+      normalized, judgmentPolicyVersion: "commitment-v1", sourceClass: "email", qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work" },
+    });
+    expect(replay.candidate.id).toBe(second.candidate.id);
+    expect(replay.commitment?.id).toBe(split.target.id);
+
+    const relinked = await domain.relinkCommitmentCandidate(second.candidate.id, first.commitment!.id, "The split was incorrect after reviewing both receipts.");
+    expect(relinked.source).toMatchObject({ id: split.target.id, status: "superseded", signals: [] });
+    expect(relinked.target.status).toBe("open");
+    expect(relinked.target.signals.map((signal) => signal.id).sort()).toEqual([
+      first.candidate.signal.id,
+      second.candidate.signal.id,
+    ].sort());
+    const restoredCard = await store.readCard(relinked.target.owner.feedId, relinked.target.owner.cardId);
+    expect(restoredCard.status).not.toBe("done");
+    expect(restoredCard.completedAt).toBeUndefined();
+    expect((await store.listCommitmentEvents(relinked.target.id)).at(-1)).toMatchObject({ type: "signal_relinked" });
   });
 
   test("rehydrates the canonical index and event history from SQLite after restart", async () => {

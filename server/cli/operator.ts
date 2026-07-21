@@ -63,12 +63,15 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
         output = await store.readWorkspace(value("feed"));
         break;
       case "workspace:now":
+        await domain.refreshWorkspacePriorities();
         output = (await store.readWorkspaceControlPlane()).now;
         break;
       case "workspace:coverage":
+        await domain.refreshWorkspacePriorities();
         output = (await store.readWorkspaceControlPlane()).coverage;
         break;
       case "workspace:priority":
+        await domain.refreshWorkspacePriorities();
         output = (await store.readWorkspaceControlPlane()).priority;
         break;
       case "workspace:instruct":
@@ -205,6 +208,20 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
         output = await domain.confirmCommitmentCandidate(required("candidate"), flag("accept"));
         break;
       }
+      case "commitment:candidate:split":
+        output = await domain.splitCommitmentCandidate(required("candidate"), {
+          deduplicationKey: required("deduplication-key"),
+          reason: required("reason"),
+          ...(value("owner-feed") ? { ownerFeedId: value("owner-feed") } : {}),
+        });
+        break;
+      case "commitment:candidate:relink":
+        output = await domain.relinkCommitmentCandidate(
+          required("candidate"),
+          required("commitment"),
+          required("reason"),
+        );
+        break;
       case "commitment:transition":
         output = await domain.transitionCommitment(
           required("commitment"),
@@ -214,6 +231,9 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
         break;
       case "priority:rules:activate":
         output = await domain.activateInitialPriorityRules(json(required("rules")), required("reason"));
+        break;
+      case "priority:evaluate":
+        output = await domain.refreshWorkspacePriorities(value("judgment-policy") ?? undefined);
         break;
       case "priority:correction":
         output = await domain.recordPriorityCorrection({

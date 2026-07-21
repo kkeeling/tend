@@ -216,6 +216,7 @@ export type CommitmentLifecycle =
 
 export interface CommitmentSignalRef {
   id: string;
+  candidateId?: string;
   feedId: FeedId;
   sourceId: string;
   sourceRunId: string;
@@ -243,6 +244,7 @@ export interface CommitmentCandidateInput {
   sourceId: string;
   sourceRunId: string;
   snapshotId: string;
+  sourceSignalKey?: string;
   signalKind: CommitmentSignalKind;
   deduplicationKey: string;
   explicitness: CommitmentExplicitness;
@@ -255,10 +257,23 @@ export interface CommitmentCandidateInput {
   ownerHint: { feedId: FeedId; cardId?: string };
 }
 
+export interface CommitmentQualityGateReceipt {
+  corpusVersion: string;
+  corpusDigest: string;
+  sourceClass: string;
+  judgmentPolicyVersion: string;
+  evaluatedCases: number;
+  explicitPromiseRecall: number;
+  autoCreatePrecision: number;
+  falseAutoMerges: number;
+  passed: boolean;
+}
+
 export interface CommitmentCandidate extends CommitmentCandidateInput {
   id: string;
   feedId: FeedId;
   signal: CommitmentSignalRef;
+  qualityGate: CommitmentQualityGateReceipt;
   status: "pending_confirmation" | "accepted" | "rejected" | "linked";
   commitmentId?: string;
   confirmationCard?: { feedId: FeedId; cardId: string };
@@ -285,7 +300,7 @@ export interface WorkspaceCommitment {
 export interface CommitmentEvent {
   id: string;
   commitmentId: string;
-  type: "created" | "signal_linked" | "candidate_confirmed" | "candidate_rejected" | "lifecycle_changed" | "split" | "owner_changed";
+  type: "created" | "signal_linked" | "signal_relinked" | "candidate_confirmed" | "candidate_rejected" | "lifecycle_changed" | "split" | "owner_changed";
   at: string;
   detail: Record<string, unknown>;
 }

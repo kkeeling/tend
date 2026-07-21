@@ -57,6 +57,12 @@ Compatibility rules:
 7. Review the draft GitHub Release, attached archives, and checksums.
 8. Publish the release when the artifacts look correct.
 
+Personal fork prereleases use a fork-specific SemVer identifier such as
+`0.3.0-keeling.1`. Promote only from the deployable integration branch after testing a restored
+copy of the live runtime. Keep the prior package/data pair, export the migrated runtime before a
+rollback rehearsal, and restore compatible binary/data pairs together. See
+`docs/PERSONAL_FORK.md` for deliberate upstream intake and contribution extraction.
+
 ## Artifacts
 
 Release archives are named:
@@ -69,6 +75,7 @@ tend-<version>-<platform>-<arch>.tar.gz.sha256
 Each archive contains:
 
 - `tend` executable
+- `tend-imessage-helper` least-privilege read-only executable
 - bundled `dist/` UI assets
 - `README.md`
 - `MANUAL.md`

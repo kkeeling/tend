@@ -28,6 +28,7 @@ const PROVIDER_MINIMUM_ASSURANCE: Record<SourceProvider, ConnectorAssurance> = {
   imessage: "prepare_only",
   custom: "trusted_adapter",
 };
+const SAFE_IDENTITY_KEY = /^[a-z][a-z0-9_-]{0,63}$/i;
 
 export type TrustedAdapterVerifier = (input: {
   grant: ConnectorExecutionGrant;
@@ -138,6 +139,14 @@ export function sourceIdentityMatches(expected: SourceIdentity, observed: Source
 }
 
 export function normalizeIdentity(identity: SourceIdentity): SourceIdentity {
+  if (!identity || typeof identity !== "object" || Array.isArray(identity)) throw new Error("Connector identity must be an object.");
+  if (Object.keys(identity).length > 32) throw new Error("Connector identity contains too many fields.");
+  for (const [key, value] of Object.entries(identity)) {
+    if (!SAFE_IDENTITY_KEY.test(key) || ["__proto__", "constructor", "prototype"].includes(key)) {
+      throw new Error(`Connector identity contains an unsafe field: ${key}.`);
+    }
+    if (value !== undefined && typeof value !== "string") throw new Error(`Connector identity ${key} must be a string.`);
+  }
   return Object.fromEntries(
     Object.entries(identity)
       .filter(([, value]) => Boolean(value?.trim()))

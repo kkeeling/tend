@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, post } from "../app/api";
 import type { CardAction, WorkspaceControlPlane, WorkspaceNowItem } from "../types";
 import { RealtimeProvider } from "../state/realtime";
+import { flushVisibleCardEdits } from "../feed/cardEdits";
 import { ControlPlaneNav } from "./ControlPlaneNav";
 import { CoverageView } from "./CoverageView";
 import { NowView } from "./NowView";
@@ -28,19 +29,9 @@ export function ControlPlaneApp({ surface }: { surface: "now" | "coverage" | "le
   }, [control, selectedId]);
   const activeItem = control?.now.items.find((item) => item.id === activeId);
 
-  const flushEdits = async (item: WorkspaceNowItem) => {
-    const selector = `[data-card-id="${CSS.escape(item.id)}"] textarea[data-block-id]`;
-    const textareas = document.querySelectorAll<HTMLTextAreaElement>(selector);
-    await Promise.all(Array.from(textareas).map(async (textarea) => {
-      const block = item.card.blocks.find((candidate) => candidate.id === textarea.dataset.blockId);
-      if (!block || block.type !== "editable_text" || textarea.value === (block.value ?? "")) return;
-      await post(`/api/feeds/${item.cardRef.feedId}/cards/${item.cardRef.cardId}/blocks/${block.id}`, { value: textarea.value });
-    }));
-  };
-
   const runAction = (item: WorkspaceNowItem, action: CardAction) => void (async () => {
     try {
-      await flushEdits(item);
+      await flushVisibleCardEdits(item.card, item.id);
       await post(`/api/feeds/${item.cardRef.feedId}/cards/${item.cardRef.cardId}/actions/${encodeURIComponent(action.id)}`);
       showToast(action.behavior === "dismiss_card" ? "Card dismissed" : `${action.label} queued for the owning feed`);
       await refresh();
