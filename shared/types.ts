@@ -33,12 +33,131 @@ export type BlockType =
   | "chart"
   | "receipt";
 
+export type SourceProvider =
+  | "gmail"
+  | "outlook_email"
+  | "google_calendar"
+  | "outlook_calendar"
+  | "slack"
+  | "teams"
+  | "granola"
+  | "imessage"
+  | "custom";
+
+export interface SourceIdentity {
+  account?: string;
+  tenant?: string;
+  workspace?: string;
+  calendar?: string;
+  device?: string;
+}
+
+export type SourceOnboardingState = "authorization_required" | "connected" | "paused" | "disconnected";
+export type SourceActionCapability = "read" | "prepare_reply" | "send_reply" | "write";
+
+export interface SourceProfile {
+  provider: SourceProvider;
+  expectedIdentity: SourceIdentity;
+  required: boolean;
+  cadenceMinutes: number;
+  freshnessMinutes: number;
+  lookbackDays: number;
+  onboardingState: SourceOnboardingState;
+  scopeSummary?: string;
+  actionCapabilities: SourceActionCapability[];
+}
+
 export interface SourceRecipe {
   id: string;
   name: string;
   filename: string;
   checkpointFilename: string;
   summary: string;
+  profile?: SourceProfile;
+}
+
+export type SourceAttemptOutcome =
+  | "success"
+  | "no_change"
+  | "partial"
+  | "rate_limited"
+  | "permission_denied"
+  | "identity_mismatch"
+  | "connector_unavailable"
+  | "transient_error"
+  | "authorization_required"
+  | "paused"
+  | "disconnected";
+
+export interface SourceAttemptCompleteness {
+  identityVerified: boolean;
+  scopeVerified: boolean;
+  permissionsComplete: boolean;
+  paginationComplete: boolean;
+  backfillComplete: boolean;
+  watermark?: string;
+}
+
+export interface SourceAttempt {
+  id: string;
+  feedId: FeedId;
+  sourceId: string;
+  outcome: SourceAttemptOutcome;
+  startedAt: string;
+  completedAt: string;
+  observedIdentity?: SourceIdentity;
+  completeness?: SourceAttemptCompleteness;
+  runId?: string;
+  triggerWorkId?: string;
+  checkpointAdvanced: boolean;
+  error?: { class: string; message: string };
+}
+
+export interface SourceCollectionProof {
+  outcome: "success" | "no_change";
+  observedIdentity: SourceIdentity;
+  completeness: SourceAttemptCompleteness;
+  startedAt?: string;
+}
+
+export type SourceCoverageState =
+  | "not_configured"
+  | "authorization_required"
+  | "connected_not_collected"
+  | "fresh"
+  | "partial"
+  | "stale"
+  | "rate_limited"
+  | "permission_denied"
+  | "identity_mismatch"
+  | "paused"
+  | "disconnected";
+
+export interface SourceCoverage {
+  id: string;
+  feedId: FeedId;
+  sourceId: string;
+  name: string;
+  provider: SourceProvider | null;
+  expectedIdentity: SourceIdentity | null;
+  observedIdentity: SourceIdentity | null;
+  required: boolean;
+  state: SourceCoverageState;
+  allClearEligible: boolean;
+  lastAttemptAt: string | null;
+  lastGoodAt: string | null;
+  ageMinutes: number | null;
+  remediation: string | null;
+  detail: string;
+}
+
+export interface WorkspaceCoverage {
+  asOf: string;
+  allClear: boolean;
+  requiredSources: number;
+  freshRequiredSources: number;
+  caveat: string;
+  sources: SourceCoverage[];
 }
 
 export interface ThreadBinding {
@@ -537,4 +656,5 @@ export interface WorkspaceView {
   agents?: WorkspaceAgentSummary;
   dictation: DictationCapability;
   proposals: RevisionProposal[];
+  coverage?: WorkspaceCoverage;
 }

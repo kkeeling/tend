@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { attentionDbPath } from "./paths";
-import type { Card, FeedEvent, MindContextBinding, MindContextUpdate, PolicyRevision, RevisionProposal, RoutineActionGroup, SourceRecipe, SourceRun, SweepBatch, SweepFeedbackTrace, SweepState, WorkItem, WorkspaceRevision } from "../shared/types";
+import type { Card, FeedEvent, MindContextBinding, MindContextUpdate, PolicyRevision, RevisionProposal, RoutineActionGroup, SourceAttempt, SourceRecipe, SourceRun, SweepBatch, SweepFeedbackTrace, SweepState, WorkItem, WorkspaceRevision } from "../shared/types";
 import type { MobileCommandReceipt } from "../shared/mobile";
 import type { CardRepository } from "./repositories/cards";
 import type { FeedEventRepository } from "./repositories/feedEvents";
@@ -11,13 +11,14 @@ import type { MobileCommandReceiptRepository } from "./repositories/mobileComman
 import type { RevisionRepository } from "./repositories/revisions";
 import type { RoutineActionGroupRepository } from "./repositories/routineActionGroups";
 import type { SourceRunRepository } from "./repositories/sourceRuns";
+import type { SourceAttemptRepository } from "./repositories/sourceAttempts";
 import { defaultCheckpoint, type SourceRecord, type SourceRepository } from "./repositories/sources";
 import { defaultSweepState, type SweepRepository } from "./repositories/sweeps";
 import type { TextDocumentRepository, TextDocumentSeed } from "./repositories/textDocuments";
 import type { WorkItemRepository } from "./repositories/workItems";
 import type { WorkspaceFeedRepository } from "./repositories/workspaceFeeds";
 
-export const SQLITE_SCHEMA_VERSION = 14;
+export const SQLITE_SCHEMA_VERSION = 15;
 
 export type LocalRuntimeStatus = {
   dbPath: string;
@@ -37,6 +38,11 @@ export class LocalSqliteStore {
   async init(): Promise<void> {
     await mkdir(path.dirname(this.dbPath), { recursive: true });
     const db = this.database();
+    db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
+    const existingSchema = Number((db.query("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined)?.value ?? "0");
+    if (existingSchema > SQLITE_SCHEMA_VERSION) {
+      throw new Error(`Runtime schema ${existingSchema} is newer than this Tend build supports (${SQLITE_SCHEMA_VERSION}).`);
+    }
     db.exec(`
       PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS meta (
@@ -112,6 +118,16 @@ export class LocalSqliteStore {
       );
       CREATE INDEX IF NOT EXISTS idx_source_runs_feed_source ON source_runs (feed_id, source_id);
       CREATE INDEX IF NOT EXISTS idx_source_runs_trigger_work ON source_runs (trigger_work_id);
+      CREATE TABLE IF NOT EXISTS source_attempts (
+        feed_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        completed_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        PRIMARY KEY (feed_id, id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_source_attempts_feed_source_completed ON source_attempts (feed_id, source_id, completed_at, id);
       CREATE TABLE IF NOT EXISTS source_recipes (
         feed_id TEXT NOT NULL,
         source_id TEXT NOT NULL,
@@ -119,6 +135,7 @@ export class LocalSqliteStore {
         filename TEXT NOT NULL,
         checkpoint_filename TEXT NOT NULL,
         summary TEXT NOT NULL,
+        profile_json TEXT,
         content_text TEXT NOT NULL,
         checkpoint_json TEXT NOT NULL,
         PRIMARY KEY (feed_id, source_id)
@@ -190,6 +207,7 @@ export class LocalSqliteStore {
     `);
     this.migrateFeedScopedPrimaryKeys();
     this.migrateFeedEventOrdering();
+    this.migrateSourceProfiles();
     const now = new Date().toISOString();
     this.setMeta("schema_version", String(SQLITE_SCHEMA_VERSION));
     if (!this.getMeta("created_at")) this.setMeta("created_at", now);
@@ -265,6 +283,10 @@ export class LocalSqliteStore {
 
   sourceRuns(): SourceRunRepository {
     return new SqliteSourceRunRepository(() => this.database());
+  }
+
+  sourceAttempts(): SourceAttemptRepository {
+    return new SqliteSourceAttemptRepository(() => this.database());
   }
 
   sources(): SourceRepository {
@@ -400,6 +422,14 @@ export class LocalSqliteStore {
       db.exec("UPDATE feed_events SET event_order = rowid;");
     }
     db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_events_order ON feed_events (event_order);");
+  }
+
+  private migrateSourceProfiles(): void {
+    const db = this.database();
+    const columns = db.query("PRAGMA table_info(source_recipes)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "profile_json")) {
+      db.exec("ALTER TABLE source_recipes ADD COLUMN profile_json TEXT;");
+    }
   }
 }
 
@@ -728,6 +758,29 @@ class SqliteSourceRunRepository implements SourceRunRepository {
   }
 }
 
+class SqliteSourceAttemptRepository implements SourceAttemptRepository {
+  constructor(private readonly database: () => Database) {}
+
+  async init(_feedIds: string[]): Promise<void> {}
+
+  async list(feedId: string, sourceId?: string): Promise<SourceAttempt[]> {
+    const rows = sourceId === undefined
+      ? this.database().query("SELECT payload_json FROM source_attempts WHERE feed_id = ? ORDER BY completed_at ASC, id ASC").all(feedId)
+      : this.database().query("SELECT payload_json FROM source_attempts WHERE feed_id = ? AND source_id = ? ORDER BY completed_at ASC, id ASC").all(feedId, sourceId);
+    return (rows as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as SourceAttempt);
+  }
+
+  async append(attempt: SourceAttempt): Promise<void> {
+    this.database()
+      .query(`
+        INSERT INTO source_attempts (feed_id, id, source_id, outcome, completed_at, payload_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(feed_id, id) DO NOTHING
+      `)
+      .run(attempt.feedId, attempt.id, attempt.sourceId, attempt.outcome, attempt.completedAt, JSON.stringify(attempt));
+  }
+}
+
 class SqliteSourceRepository implements SourceRepository {
   constructor(private readonly database: () => Database) {}
 
@@ -735,15 +788,15 @@ class SqliteSourceRepository implements SourceRepository {
 
   async list(feedId: string): Promise<SourceRecord[]> {
     const rows = this.database()
-      .query("SELECT source_id, name, filename, checkpoint_filename, summary, content_text, checkpoint_json FROM source_recipes WHERE feed_id = ? ORDER BY name ASC, source_id ASC")
-      .all(feedId) as Array<{ source_id: string; name: string; filename: string; checkpoint_filename: string; summary: string; content_text: string; checkpoint_json: string }>;
+      .query("SELECT source_id, name, filename, checkpoint_filename, summary, profile_json, content_text, checkpoint_json FROM source_recipes WHERE feed_id = ? ORDER BY name ASC, source_id ASC")
+      .all(feedId) as Array<{ source_id: string; name: string; filename: string; checkpoint_filename: string; summary: string; profile_json: string | null; content_text: string; checkpoint_json: string }>;
     return rows.map((row) => this.record(feedId, row));
   }
 
   async get(feedId: string, sourceId: string): Promise<SourceRecord> {
     const row = this.database()
-      .query("SELECT source_id, name, filename, checkpoint_filename, summary, content_text, checkpoint_json FROM source_recipes WHERE feed_id = ? AND source_id = ?")
-      .get(feedId, sourceId) as { source_id: string; name: string; filename: string; checkpoint_filename: string; summary: string; content_text: string; checkpoint_json: string } | undefined;
+      .query("SELECT source_id, name, filename, checkpoint_filename, summary, profile_json, content_text, checkpoint_json FROM source_recipes WHERE feed_id = ? AND source_id = ?")
+      .get(feedId, sourceId) as { source_id: string; name: string; filename: string; checkpoint_filename: string; summary: string; profile_json: string | null; content_text: string; checkpoint_json: string } | undefined;
     if (!row) throw new Error(`Source recipe not found: ${sourceId}`);
     return this.record(feedId, row);
   }
@@ -753,17 +806,18 @@ class SqliteSourceRepository implements SourceRepository {
     const nextCheckpoint = checkpoint === undefined ? existingCheckpoint ?? defaultCheckpoint(recipe.id) : checkpoint;
     this.database()
       .query(`
-        INSERT INTO source_recipes (feed_id, source_id, name, filename, checkpoint_filename, summary, content_text, checkpoint_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO source_recipes (feed_id, source_id, name, filename, checkpoint_filename, summary, profile_json, content_text, checkpoint_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(feed_id, source_id) DO UPDATE SET
           name = excluded.name,
           filename = excluded.filename,
           checkpoint_filename = excluded.checkpoint_filename,
           summary = excluded.summary,
+          profile_json = excluded.profile_json,
           content_text = excluded.content_text,
           checkpoint_json = excluded.checkpoint_json
       `)
-      .run(feedId, recipe.id, recipe.name, recipe.filename, recipe.checkpointFilename, recipe.summary, content, JSON.stringify(nextCheckpoint));
+      .run(feedId, recipe.id, recipe.name, recipe.filename, recipe.checkpointFilename, recipe.summary, recipe.profile ? JSON.stringify(recipe.profile) : null, content, JSON.stringify(nextCheckpoint));
   }
 
   async remove(feedId: string, sourceId: string): Promise<void> {
@@ -781,7 +835,7 @@ class SqliteSourceRepository implements SourceRepository {
     await this.write(feedId, record.recipe, record.content, checkpoint);
   }
 
-  private record(feedId: string, row: { source_id: string; name: string; filename: string; checkpoint_filename: string; summary: string; content_text: string; checkpoint_json: string }): SourceRecord {
+  private record(feedId: string, row: { source_id: string; name: string; filename: string; checkpoint_filename: string; summary: string; profile_json: string | null; content_text: string; checkpoint_json: string }): SourceRecord {
     return {
       recipe: {
         id: row.source_id,
@@ -789,6 +843,7 @@ class SqliteSourceRepository implements SourceRepository {
         filename: row.filename,
         checkpointFilename: row.checkpoint_filename,
         summary: row.summary,
+        ...(row.profile_json ? { profile: JSON.parse(row.profile_json) as SourceRecipe["profile"] } : {}),
       },
       content: row.content_text,
       checkpoint: JSON.parse(row.checkpoint_json) as unknown,

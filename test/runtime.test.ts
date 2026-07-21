@@ -6,6 +6,7 @@ import path from "node:path";
 import { AttentionDomain } from "../server/domain";
 import { attentionHome } from "../server/paths";
 import { createLocalRuntime, resolveRuntimeRoot } from "../server/runtime";
+import { LocalSqliteStore, SQLITE_SCHEMA_VERSION } from "../server/sqlite";
 
 describe("runtime resolution", () => {
   test("uses the same default home for source and packaged entrypoints", () => {
@@ -28,6 +29,28 @@ describe("runtime resolution", () => {
     } finally {
       if (previous === undefined) delete process.env.ATTENTION_HOME;
       else process.env.ATTENTION_HOME = previous;
+    }
+  });
+
+  test("refuses a runtime created by a newer schema", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "attention-newer-schema-"));
+    const dbPath = path.join(root, "attention.db");
+    const newer = new Database(dbPath, { create: true });
+    newer.exec(`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+    newer.query("INSERT INTO meta (key, value) VALUES ('schema_version', ?)").run(String(SQLITE_SCHEMA_VERSION + 1));
+    newer.close();
+
+    const sqlite = new LocalSqliteStore(dbPath);
+    try {
+      await expect(sqlite.init()).rejects.toThrow("newer than this Tend build supports");
+      const unchanged = new Database(dbPath);
+      expect(unchanged.query("SELECT value FROM meta WHERE key = 'schema_version'").get()).toEqual({
+        value: String(SQLITE_SCHEMA_VERSION + 1),
+      });
+      unchanged.close();
+    } finally {
+      sqlite.close();
+      await rm(root, { recursive: true, force: true });
     }
   });
 

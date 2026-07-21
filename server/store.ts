@@ -18,6 +18,7 @@ import type {
   RevisionProposal,
   RoutineActionGroup,
   SourceRun,
+  SourceAttempt,
   SourceRecipe,
   SweepBatch,
   SweepFeedbackTrace,
@@ -27,6 +28,7 @@ import type {
   WorkItem,
   WorkItemView,
   WorkspaceRevision,
+  WorkspaceCoverage,
   WorkspaceView,
 } from "../shared/types";
 import {
@@ -51,12 +53,14 @@ import { FileMobileCommandReceiptRepository, type MobileCommandReceiptRepository
 import { FileRevisionRepository, type RevisionRepository } from "./repositories/revisions";
 import { FileRoutineActionGroupRepository, type RoutineActionGroupRepository } from "./repositories/routineActionGroups";
 import { FileSourceRunRepository, type SourceRunRepository } from "./repositories/sourceRuns";
+import { FileSourceAttemptRepository, type SourceAttemptRepository } from "./repositories/sourceAttempts";
 import { FileSourceRepository, type SourceRepository } from "./repositories/sources";
 import { FileSweepRepository, type SweepRepository } from "./repositories/sweeps";
 import { FileTextDocumentRepository, type TextDocumentRepository, type TextDocumentSeed } from "./repositories/textDocuments";
 import { FileWorkItemRepository, type WorkItemRepository } from "./repositories/workItems";
 import { FileWorkspaceFeedRepository, type WorkspaceFeedRepository } from "./repositories/workspaceFeeds";
 import type { MobileCommandReceipt } from "../shared/mobile";
+import { projectCoverage } from "./workflow/coverage";
 
 export const GLOBAL_PROMPT_NAMES = ["judge.md", "compose-card.md", "execute-work.md", "distill-policy.md", "compound.md"] as const;
 export const FEED_PROMPT_NAMES = ["judge.md", "compose-card.md"] as const;
@@ -96,6 +100,7 @@ export class AttentionStore {
   private readonly revisions: RevisionRepository;
   private readonly routineActionGroups: RoutineActionGroupRepository;
   private readonly sourceRuns: SourceRunRepository;
+  private readonly sourceAttempts: SourceAttemptRepository;
   private readonly sources: SourceRepository;
   private readonly sweeps: SweepRepository;
   private readonly textDocuments: TextDocumentRepository;
@@ -104,7 +109,7 @@ export class AttentionStore {
   private readonly runAtomic?: AtomicRunner;
   private readonly agentWakeSeq = new Map<AgentPresence["agent"], number>();
 
-  constructor(dataDir: string, options: { cards?: CardRepository; events?: FeedEventRepository; mindContext?: MindContextRepository; mobileCommandReceipts?: MobileCommandReceiptRepository; revisions?: RevisionRepository; routineActionGroups?: RoutineActionGroupRepository; sourceRuns?: SourceRunRepository; sources?: SourceRepository; sweeps?: SweepRepository; textDocuments?: TextDocumentRepository; workItems?: WorkItemRepository; workspaceFeeds?: WorkspaceFeedRepository; runAtomic?: AtomicRunner } = {}) {
+  constructor(dataDir: string, options: { cards?: CardRepository; events?: FeedEventRepository; mindContext?: MindContextRepository; mobileCommandReceipts?: MobileCommandReceiptRepository; revisions?: RevisionRepository; routineActionGroups?: RoutineActionGroupRepository; sourceAttempts?: SourceAttemptRepository; sourceRuns?: SourceRunRepository; sources?: SourceRepository; sweeps?: SweepRepository; textDocuments?: TextDocumentRepository; workItems?: WorkItemRepository; workspaceFeeds?: WorkspaceFeedRepository; runAtomic?: AtomicRunner } = {}) {
     this.dataDir = dataDir;
     this.cards = options.cards ?? new FileCardRepository(this.dataDir);
     this.events = options.events ?? new FileFeedEventRepository(this.dataDir);
@@ -112,6 +117,7 @@ export class AttentionStore {
     this.mobileCommandReceipts = options.mobileCommandReceipts ?? new FileMobileCommandReceiptRepository(this.dataDir);
     this.revisions = options.revisions ?? new FileRevisionRepository(this.dataDir);
     this.routineActionGroups = options.routineActionGroups ?? new FileRoutineActionGroupRepository(this.dataDir);
+    this.sourceAttempts = options.sourceAttempts ?? new FileSourceAttemptRepository(this.dataDir);
     this.sourceRuns = options.sourceRuns ?? new FileSourceRunRepository(this.dataDir);
     this.sources = options.sources ?? new FileSourceRepository(this.dataDir);
     this.sweeps = options.sweeps ?? new FileSweepRepository(this.dataDir);
@@ -136,6 +142,7 @@ export class AttentionStore {
     await this.mobileCommandReceipts.init();
     await this.revisions.init(feedIds);
     await this.routineActionGroups.init(feedIds);
+    await this.sourceAttempts.init(feedIds);
     await this.sourceRuns.init(feedIds);
     await this.sources.init(feedIds);
     await this.sweeps.init(feedIds);
@@ -167,7 +174,17 @@ export class AttentionStore {
       agents: await this.readWorkspaceAgents(),
       dictation: await this.readDictationCapability(),
       proposals: await this.readRevisionProposals(selected),
+      coverage: await this.readWorkspaceCoverage(),
     };
+  }
+
+  async readWorkspaceCoverage(now = new Date()): Promise<WorkspaceCoverage> {
+    const feedIds = await this.workspaceFeeds.listFeedIds();
+    const records = (await Promise.all(feedIds.map(async (feedId) =>
+      (await this.sources.list(feedId)).map(({ recipe }) => ({ feedId, recipe })),
+    ))).flat();
+    const attempts = (await Promise.all(feedIds.map((feedId) => this.sourceAttempts.list(feedId)))).flat();
+    return projectCoverage(records, attempts, now);
   }
 
   async listFeedIds(): Promise<string[]> {
@@ -584,6 +601,14 @@ export class AttentionStore {
 
   async writeRun(run: SourceRun): Promise<void> {
     await this.sourceRuns.write(run);
+  }
+
+  async appendSourceAttempt(attempt: SourceAttempt): Promise<void> {
+    await this.sourceAttempts.append(attempt);
+  }
+
+  async listSourceAttempts(feedId: string, sourceId?: string): Promise<SourceAttempt[]> {
+    return this.sourceAttempts.list(feedId, sourceId);
   }
 
   async readRun(feedId: string, runId: string): Promise<SourceRun> {

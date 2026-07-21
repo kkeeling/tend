@@ -9,6 +9,7 @@ import { MirrorWriteCoordinator } from "./repositories/mirrorWrites";
 import { FileRevisionRepository, MirroredRevisionRepository } from "./repositories/revisions";
 import { FileRoutineActionGroupRepository, MirroredRoutineActionGroupRepository } from "./repositories/routineActionGroups";
 import { FileSourceRunRepository, MirroredSourceRunRepository } from "./repositories/sourceRuns";
+import { FileSourceAttemptRepository, MirroredSourceAttemptRepository } from "./repositories/sourceAttempts";
 import { FileSourceRepository, MirroredSourceRepository } from "./repositories/sources";
 import { FileSweepRepository, MirroredSweepRepository } from "./repositories/sweeps";
 import { FileTextDocumentRepository, MirroredTextDocumentRepository } from "./repositories/textDocuments";
@@ -82,6 +83,11 @@ export async function createLocalRuntime(
     sqlite.sourceRuns(),
     new FileSourceRunRepository(dataDir),
   );
+  const sourceAttempts = new MirroredSourceAttemptRepository(
+    sqlite.sourceAttempts(),
+    new FileSourceAttemptRepository(dataDir),
+    mirrorWrites,
+  );
   const sources = new MirroredSourceRepository(
     sqlite.sources(),
     new FileSourceRepository(dataDir),
@@ -103,6 +109,7 @@ export async function createLocalRuntime(
     revisions,
     routineActionGroups,
     runAtomic: (callback) => mirrorWrites.transaction(() => sqlite.transaction(callback)),
+    sourceAttempts,
     sourceRuns,
     sources,
     sweeps,

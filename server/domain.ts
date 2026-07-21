@@ -24,6 +24,10 @@ import type {
   ProposedAction,
   RevisionProposal,
   RoutineActionGroup,
+  SourceAttempt,
+  SourceAttemptOutcome,
+  SourceCollectionProof,
+  SourceIdentity,
   SourceRecipe,
   SourceRunContextUse,
   SweepFeedbackTrace,
@@ -51,6 +55,10 @@ import { mobileActionConfirmation, projectMobileCard, projectMobileRoutineAction
 
 function appendHistory(card: Card, type: string, detail?: string): void {
   card.history.push({ at: isoNow(), type, detail });
+}
+
+function sourceIdentityMatches(expected: SourceIdentity, observed: SourceIdentity): boolean {
+  return Object.entries(expected).every(([key, value]) => value === undefined || observed[key as keyof SourceIdentity] === value);
 }
 
 type WorkCaller =
@@ -2681,20 +2689,83 @@ export class AttentionDomain {
     }));
   }
 
-  async recordSourceRun(feedId: string, sourceId: string, snapshots: unknown[], judgments: unknown[], checkpoint: unknown, triggerWorkId?: string, contextUse?: SourceRunContextUse): Promise<string> {
-    return this.store.serialize(async () => {
+  async recordSourceRun(feedId: string, sourceId: string, snapshots: unknown[], judgments: unknown[], checkpoint: unknown, triggerWorkId?: string, contextUse?: SourceRunContextUse, collectionProof?: SourceCollectionProof): Promise<string> {
+    return this.store.serializeAtomic(async () => {
       const feed = await this.store.readFeed(feedId);
-      if (!feed.sources.some((source) => source.id === sourceId)) throw new Error(`Source recipe not found: ${sourceId}`);
+      const source = feed.sources.find((item) => item.id === sourceId);
+      if (!source) throw new Error(`Source recipe not found: ${sourceId}`);
+      if (source.profile && !collectionProof) throw new Error("Profiled sources require observed identity and completeness proof.");
+      if (source.profile && collectionProof && !sourceIdentityMatches(source.profile.expectedIdentity, collectionProof.observedIdentity)) {
+        throw new Error("Observed source identity does not match the configured profile.");
+      }
+      if (source.profile && collectionProof && !Object.values(collectionProof.completeness).every((value) => value === true || typeof value === "string")) {
+        throw new Error("Successful source collection requires complete identity, scope, permissions, pagination, and backfill proof.");
+      }
       if (triggerWorkId) await this.assertClaimedRecollectionWork(feedId, triggerWorkId);
       const normalizedContextUse = contextUse
         ? normalizeContextUse(contextUse, await this.requireCurrentMindContext(contextUse.updateId), snapshots)
         : undefined;
       const runId = makeId("run");
+      const completedAt = isoNow();
       for (const [index, snapshot] of snapshots.entries()) await this.store.writeRawSnapshot(feedId, runId, sourceId, `snapshot-${index + 1}`, snapshot);
-      await this.store.writeRun({ id: runId, feedId, sourceId, snapshots: snapshots.length, judgments, ...(normalizedContextUse ? { contextUse: normalizedContextUse } : {}), ...(triggerWorkId ? { triggerWorkId } : {}), completedAt: isoNow() });
+      await this.store.writeRun({ id: runId, feedId, sourceId, snapshots: snapshots.length, judgments, ...(normalizedContextUse ? { contextUse: normalizedContextUse } : {}), ...(triggerWorkId ? { triggerWorkId } : {}), completedAt });
       await this.store.writeSourceCheckpoint(feedId, sourceId, checkpoint);
+      if (collectionProof) {
+        await this.store.appendSourceAttempt({
+          id: makeId("attempt"),
+          feedId,
+          sourceId,
+          outcome: collectionProof.outcome,
+          startedAt: collectionProof.startedAt ?? completedAt,
+          completedAt,
+          observedIdentity: collectionProof.observedIdentity,
+          completeness: collectionProof.completeness,
+          runId,
+          ...(triggerWorkId ? { triggerWorkId } : {}),
+          checkpointAdvanced: true,
+        });
+      }
       await this.store.appendEvent({ feedId, workId: triggerWorkId, type: "source.run_completed", detail: { runId, sourceId, triggerWorkId, snapshots: snapshots.length, judgments: judgments.length, contextUse: normalizedContextUse } });
       return runId;
+    });
+  }
+
+  async recordSourceAttempt(
+    feedId: string,
+    sourceId: string,
+    input: {
+      outcome: Exclude<SourceAttemptOutcome, "success" | "no_change">;
+      observedIdentity?: SourceIdentity;
+      startedAt?: string;
+      triggerWorkId?: string;
+      error?: SourceAttempt["error"];
+    },
+  ): Promise<SourceAttempt> {
+    return this.store.serializeAtomic(async () => {
+      const feed = await this.store.readFeed(feedId);
+      if (!feed.sources.some((source) => source.id === sourceId)) throw new Error(`Source recipe not found: ${sourceId}`);
+      if (input.triggerWorkId) await this.assertClaimedRecollectionWork(feedId, input.triggerWorkId);
+      const completedAt = isoNow();
+      const attempt: SourceAttempt = {
+        id: makeId("attempt"),
+        feedId,
+        sourceId,
+        outcome: input.outcome,
+        startedAt: input.startedAt ?? completedAt,
+        completedAt,
+        ...(input.observedIdentity ? { observedIdentity: input.observedIdentity } : {}),
+        ...(input.triggerWorkId ? { triggerWorkId: input.triggerWorkId } : {}),
+        checkpointAdvanced: false,
+        ...(input.error ? { error: input.error } : {}),
+      };
+      await this.store.appendSourceAttempt(attempt);
+      await this.store.appendEvent({
+        feedId,
+        workId: input.triggerWorkId,
+        type: "source.attempt_failed",
+        detail: { attemptId: attempt.id, sourceId, outcome: attempt.outcome },
+      });
+      return attempt;
     });
   }
 
