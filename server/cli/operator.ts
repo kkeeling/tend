@@ -18,6 +18,7 @@ import {
   importLegacyInboxCard,
 } from "./legacyImports";
 import { assertCliRuntimeMatchesLive } from "./runtimeGuard";
+import type { CommitmentLifecycle } from "../../shared/types";
 
 export async function runOperatorCli(rawArgs: string[]): Promise<void> {
   const root = resolveAppRoot();
@@ -144,6 +145,24 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
           value("context-use") || value("context-use-file")
             ? await structured("context-use")
             : undefined,
+        );
+        break;
+      case "commitment:candidate:record":
+        output = await domain.recordCommitmentCandidate(
+          required("feed"),
+          await structured("candidate"),
+        );
+        break;
+      case "commitment:candidate:confirm": {
+        if (flag("accept") === flag("reject")) throw new Error("Choose exactly one of --accept or --reject.");
+        output = await domain.confirmCommitmentCandidate(required("candidate"), flag("accept"));
+        break;
+      }
+      case "commitment:transition":
+        output = await domain.transitionCommitment(
+          required("commitment"),
+          required("status") as CommitmentLifecycle,
+          required("reason"),
         );
         break;
       case "sweep:record-batch":

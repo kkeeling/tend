@@ -6,6 +6,10 @@ import type {
   CardAction,
   CardBlock,
   CardContextInfluence,
+  CommitmentCandidate,
+  CommitmentCandidateInput,
+  CommitmentEvent,
+  CommitmentLifecycle,
   FeedConfig,
   FeedMindContext,
   FeedView,
@@ -40,6 +44,7 @@ import type {
   WorkItem,
   WorkItemView,
   WorkspaceRevision,
+  WorkspaceCommitment,
 } from "../shared/types";
 import type { MobileActionProjection, MobileCommand, MobileCommandResult, MobileCommandReceipt } from "../shared/mobile";
 import { isReservedCardActionId, safeConfiguredCardActions } from "../shared/cardActions";
@@ -52,6 +57,7 @@ import { digest, isoNow, makeId, makeToken, safeIdentifier, slugify } from "./ut
 import { actionDigest, cleanupDigest, configuredApprovalAction, requiredSourceMailbox, routineActionDigest, verifySourceMailbox } from "./workflow/approvals";
 import { queuedWork } from "./workflow/workItems";
 import { mobileActionConfirmation, projectMobileCard, projectMobileRoutineAction } from "./mobile/projection";
+import { assertCommitmentTransition } from "./workflow/commitments";
 
 function appendHistory(card: Card, type: string, detail?: string): void {
   card.history.push({ at: isoNow(), type, detail });
@@ -2561,6 +2567,7 @@ export class AttentionDomain {
         sourceMailbox: input.sourceMailbox ?? existing?.sourceMailbox,
         sourceRunIds: sourceRunIds ?? existing?.sourceRunIds,
         contextInfluence,
+        commitmentId: input.commitmentId ?? existing?.commitmentId,
         blocks: input.blocks,
         proposedAction: input.proposedAction,
         actions: input.actions,
@@ -2767,6 +2774,243 @@ export class AttentionDomain {
       });
       return attempt;
     });
+  }
+
+  async recordCommitmentCandidate(
+    feedId: string,
+    input: CommitmentCandidateInput,
+  ): Promise<{ candidate: CommitmentCandidate; commitment: WorkspaceCommitment | null }> {
+    return this.store.serializeAtomic(async () => {
+      const promise = requiredMindText(input.normalized.promise, "Commitment promise", 500);
+      const deduplicationKey = requiredMindText(input.deduplicationKey, "Commitment deduplication key", 240);
+      const sourceClass = requiredMindText(input.sourceClass, "Commitment source class", 80);
+      const judgmentPolicyVersion = requiredMindText(input.judgmentPolicyVersion, "Commitment judgment policy version", 80);
+      safeIdentifier(feedId, "Feed id");
+      safeIdentifier(input.sourceId, "Source id");
+      safeIdentifier(input.sourceRunId, "Source run id");
+      safeIdentifier(input.snapshotId, "Snapshot id");
+      safeIdentifier(input.ownerHint.feedId, "Commitment owner feed id");
+      if (!Number.isFinite(input.certainty) || input.certainty < 0 || input.certainty > 1) throw new Error("Commitment certainty must be between 0 and 1.");
+      if (input.normalized.dueAt && !Number.isFinite(Date.parse(input.normalized.dueAt))) throw new Error("Commitment dueAt must be an ISO date-time.");
+      await this.store.readConfig(input.ownerHint.feedId);
+      const run = await this.store.readRun(feedId, input.sourceRunId);
+      if (run.sourceId !== input.sourceId) throw new Error("Commitment candidate source does not match its source run.");
+      const snapshotMatch = /^snapshot-(\d+)$/.exec(input.snapshotId);
+      if (!snapshotMatch || Number(snapshotMatch[1]) < 1 || Number(snapshotMatch[1]) > run.snapshots) {
+        throw new Error("Commitment candidate snapshot is not present in its source run.");
+      }
+
+      const signalId = `${feedId}:${input.sourceRunId}:${input.snapshotId}`;
+      const replay = (await this.store.listCommitmentCandidates()).find((item) => item.signal.id === signalId && item.deduplicationKey === deduplicationKey);
+      if (replay) {
+        return {
+          candidate: replay,
+          commitment: replay.commitmentId ? await this.store.readWorkspaceCommitment(replay.commitmentId) : null,
+        };
+      }
+
+      const createdAt = isoNow();
+      const candidate: CommitmentCandidate = {
+        id: makeId("candidate"),
+        feedId,
+        ...input,
+        deduplicationKey,
+        sourceClass,
+        judgmentPolicyVersion,
+        normalized: {
+          promise,
+          ...(input.normalized.deliverable ? { deliverable: requiredMindText(input.normalized.deliverable, "Commitment deliverable", 500) } : {}),
+          ...(input.normalized.owner ? { owner: requiredMindText(input.normalized.owner, "Commitment owner", 160) } : {}),
+          ...(input.normalized.dueAt ? { dueAt: new Date(input.normalized.dueAt).toISOString() } : {}),
+        },
+        signal: {
+          id: signalId,
+          feedId,
+          sourceId: input.sourceId,
+          sourceRunId: input.sourceRunId,
+          snapshotId: input.snapshotId,
+          kind: input.signalKind,
+          observedAt: run.completedAt ?? createdAt,
+          certainty: input.certainty,
+          explicitness: input.explicitness,
+        },
+        status: "pending_confirmation",
+        createdAt,
+      };
+
+      const canAutoCreate = input.explicitness === "explicit_first_person_bounded" && input.qualityGatePassed;
+      if (!canAutoCreate) {
+        const cardId = `confirm-${candidate.id}`;
+        candidate.confirmationCard = { feedId: input.ownerHint.feedId, cardId };
+        await this.writeCommitmentConfirmationCard(candidate, cardId);
+        await this.store.writeCommitmentCandidate(candidate);
+        return { candidate, commitment: null };
+      }
+
+      const commitment = await this.linkCandidateToCommitment(candidate);
+      candidate.status = "linked";
+      candidate.commitmentId = commitment.id;
+      candidate.decidedAt = isoNow();
+      await this.store.writeCommitmentCandidate(candidate);
+      return { candidate, commitment };
+    });
+  }
+
+  async confirmCommitmentCandidate(candidateId: string, accept: boolean): Promise<{ candidate: CommitmentCandidate; commitment: WorkspaceCommitment | null }> {
+    return this.store.serializeAtomic(async () => {
+      const candidate = await this.store.readCommitmentCandidate(candidateId);
+      if (candidate.status !== "pending_confirmation") throw new Error("Commitment candidate has already been decided.");
+      const decidedAt = isoNow();
+      if (!accept) {
+        candidate.status = "rejected";
+        candidate.decidedAt = decidedAt;
+        await this.store.writeCommitmentCandidate(candidate);
+        if (candidate.confirmationCard && await this.store.hasCard(candidate.confirmationCard.feedId, candidate.confirmationCard.cardId)) {
+          const card = await this.store.readCard(candidate.confirmationCard.feedId, candidate.confirmationCard.cardId);
+          card.status = "done";
+          card.completedAt = decidedAt;
+          card.completionDisposition = "dismissed";
+          await this.store.writeCard(card);
+        }
+        return { candidate, commitment: null };
+      }
+      const commitment = await this.linkCandidateToCommitment(candidate);
+      candidate.status = "accepted";
+      candidate.commitmentId = commitment.id;
+      candidate.decidedAt = decidedAt;
+      await this.store.writeCommitmentCandidate(candidate);
+      await this.store.appendCommitmentEvent({ id: makeId("commitment-event"), commitmentId: commitment.id, type: "candidate_confirmed", at: decidedAt, detail: { candidateId } });
+      if (candidate.confirmationCard && await this.store.hasCard(candidate.confirmationCard.feedId, candidate.confirmationCard.cardId)) {
+        const card = await this.store.readCard(candidate.confirmationCard.feedId, candidate.confirmationCard.cardId);
+        card.status = "done";
+        card.completedAt = decidedAt;
+        card.completionDisposition = "completed";
+        await this.store.writeCard(card);
+      }
+      return { candidate, commitment };
+    });
+  }
+
+  async transitionCommitment(commitmentId: string, status: CommitmentLifecycle, reason: string): Promise<WorkspaceCommitment> {
+    return this.store.serializeAtomic(async () => {
+      const commitment = await this.store.readWorkspaceCommitment(commitmentId);
+      assertCommitmentTransition(commitment.status, status);
+      const previous = commitment.status;
+      const expectedVersion = commitment.version;
+      commitment.status = status;
+      commitment.version += 1;
+      commitment.updatedAt = isoNow();
+      await this.store.writeWorkspaceCommitment(commitment, expectedVersion);
+      await this.store.appendCommitmentEvent({
+        id: makeId("commitment-event"),
+        commitmentId,
+        type: "lifecycle_changed",
+        at: commitment.updatedAt,
+        detail: { previous, status, reason: requiredMindText(reason, "Commitment transition reason", 500) },
+      });
+      if (await this.store.hasCard(commitment.owner.feedId, commitment.owner.cardId)) {
+        const card = await this.store.readCard(commitment.owner.feedId, commitment.owner.cardId);
+        if (status === "fulfilled" || status === "withdrawn" || status === "superseded") {
+          card.status = "done";
+          card.completedAt = commitment.updatedAt;
+          card.completionDisposition = "completed";
+        } else if (previous === "fulfilled" || previous === "withdrawn" || previous === "superseded") {
+          card.status = "to_review_updated";
+          card.completedAt = undefined;
+          card.completionDisposition = undefined;
+        }
+        await this.store.writeCard(card);
+      }
+      return commitment;
+    });
+  }
+
+  private async writeCommitmentConfirmationCard(candidate: CommitmentCandidate, cardId: string): Promise<void> {
+    const config = await this.store.readConfig(candidate.ownerHint.feedId);
+    const now = isoNow();
+    await this.store.writeCard({
+      id: cardId,
+      feedId: candidate.ownerHint.feedId,
+      kind: "attention",
+      status: "to_review_new",
+      title: `Is this your commitment? ${candidate.normalized.promise}`,
+      eyebrow: "Commitment confirmation",
+      why: candidate.qualityGatePassed ? "The source language is ambiguous." : "This source class has not passed the automatic extraction quality gate.",
+      blocks: [{ id: "candidate", type: "clarification", label: "Confirm or reject", text: candidate.normalized.promise }],
+      actions: [],
+      readyForPass: config.currentPass,
+      createdAt: now,
+      updatedAt: now,
+      history: [],
+    });
+  }
+
+  private async linkCandidateToCommitment(candidate: CommitmentCandidate): Promise<WorkspaceCommitment> {
+    let commitment = await this.store.findWorkspaceCommitmentByKey(candidate.deduplicationKey);
+    if (!commitment) {
+      const ownerFeedId = candidate.ownerHint.feedId;
+      const ownerCardId = candidate.ownerHint.cardId ?? `commitment-${digest(candidate.deduplicationKey).slice(0, 20)}`;
+      const now = isoNow();
+      commitment = {
+        id: makeId("commitment"),
+        version: 1,
+        deduplicationKey: candidate.deduplicationKey,
+        owner: { feedId: ownerFeedId, cardId: ownerCardId },
+        promise: candidate.normalized.promise,
+        ...(candidate.normalized.deliverable ? { deliverable: candidate.normalized.deliverable } : {}),
+        ...(candidate.normalized.dueAt ? { dueAt: candidate.normalized.dueAt } : {}),
+        certainty: candidate.certainty,
+        status: "open",
+        signals: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+      await this.store.writeWorkspaceCommitment(commitment);
+      await this.store.appendCommitmentEvent({ id: makeId("commitment-event"), commitmentId: commitment.id, type: "created", at: now, detail: { owner: commitment.owner } });
+      const config = await this.store.readConfig(ownerFeedId);
+      await this.store.writeCard({
+        id: ownerCardId,
+        feedId: ownerFeedId,
+        kind: "attention",
+        status: "to_review_new",
+        title: commitment.promise,
+        eyebrow: "Commitment",
+        why: "An explicit first-person bounded promise was captured from a validated source class.",
+        commitmentId: commitment.id,
+        blocks: [{ id: "commitment", type: "memo", label: "Promise", text: commitment.promise }],
+        actions: [],
+        readyForPass: config.currentPass,
+        createdAt: now,
+        updatedAt: now,
+        history: [],
+      });
+    }
+
+    if (!commitment.signals.some((signal) => signal.id === candidate.signal.id)) {
+      const expectedVersion = commitment.version;
+      commitment = {
+        ...commitment,
+        version: commitment.version + 1,
+        certainty: Math.max(commitment.certainty, candidate.certainty),
+        signals: [...commitment.signals, candidate.signal],
+        updatedAt: isoNow(),
+      };
+      await this.store.writeWorkspaceCommitment(commitment, expectedVersion);
+      await this.store.appendCommitmentEvent({
+        id: makeId("commitment-event"),
+        commitmentId: commitment.id,
+        type: "signal_linked",
+        at: commitment.updatedAt,
+        detail: { signalId: candidate.signal.id, feedId: candidate.signal.feedId, sourceId: candidate.signal.sourceId },
+      });
+      const card = await this.store.readCard(commitment.owner.feedId, commitment.owner.cardId);
+      card.blocks = [
+        ...card.blocks.filter((block) => block.id !== "source-receipts"),
+        { id: "source-receipts", type: "receipt", label: "Source receipts", text: `${commitment.signals.length} attributable source receipt${commitment.signals.length === 1 ? "" : "s"}.` },
+      ];
+      await this.store.writeCard(card);
+    }
+    return commitment;
   }
 
   async recordSweepBatch(feedId: string, sourceRunIds: string[], triggerWorkId?: string, contextUpdateId?: string): Promise<string> {

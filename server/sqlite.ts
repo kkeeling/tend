@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { attentionDbPath } from "./paths";
-import type { Card, FeedEvent, MindContextBinding, MindContextUpdate, PolicyRevision, RevisionProposal, RoutineActionGroup, SourceAttempt, SourceRecipe, SourceRun, SweepBatch, SweepFeedbackTrace, SweepState, WorkItem, WorkspaceRevision } from "../shared/types";
+import type { Card, CommitmentCandidate, CommitmentEvent, FeedEvent, MindContextBinding, MindContextUpdate, PolicyRevision, RevisionProposal, RoutineActionGroup, SourceAttempt, SourceRecipe, SourceRun, SweepBatch, SweepFeedbackTrace, SweepState, WorkItem, WorkspaceCommitment, WorkspaceRevision } from "../shared/types";
 import type { MobileCommandReceipt } from "../shared/mobile";
 import type { CardRepository } from "./repositories/cards";
 import type { FeedEventRepository } from "./repositories/feedEvents";
@@ -17,8 +17,11 @@ import { defaultSweepState, type SweepRepository } from "./repositories/sweeps";
 import type { TextDocumentRepository, TextDocumentSeed } from "./repositories/textDocuments";
 import type { WorkItemRepository } from "./repositories/workItems";
 import type { WorkspaceFeedRepository } from "./repositories/workspaceFeeds";
+import type { CommitmentCandidateRepository } from "./repositories/commitmentCandidates";
+import type { CommitmentEventRepository } from "./repositories/commitmentEvents";
+import type { WorkspaceCommitmentRepository } from "./repositories/workspaceCommitments";
 
-export const SQLITE_SCHEMA_VERSION = 15;
+export const SQLITE_SCHEMA_VERSION = 16;
 
 export type LocalRuntimeStatus = {
   dbPath: string;
@@ -128,6 +131,33 @@ export class LocalSqliteStore {
         PRIMARY KEY (feed_id, id)
       );
       CREATE INDEX IF NOT EXISTS idx_source_attempts_feed_source_completed ON source_attempts (feed_id, source_id, completed_at, id);
+      CREATE TABLE IF NOT EXISTS commitment_candidates (
+        id TEXT PRIMARY KEY,
+        feed_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_commitment_candidates_status_created ON commitment_candidates (status, created_at, id);
+      CREATE TABLE IF NOT EXISTS workspace_commitments (
+        id TEXT PRIMARY KEY,
+        deduplication_key TEXT NOT NULL UNIQUE,
+        owner_feed_id TEXT NOT NULL,
+        owner_card_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_workspace_commitments_status_updated ON workspace_commitments (status, updated_at, id);
+      CREATE TABLE IF NOT EXISTS commitment_events (
+        id TEXT PRIMARY KEY,
+        commitment_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        at TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_commitment_events_commitment_at ON commitment_events (commitment_id, at, id);
       CREATE TABLE IF NOT EXISTS source_recipes (
         feed_id TEXT NOT NULL,
         source_id TEXT NOT NULL,
@@ -287,6 +317,18 @@ export class LocalSqliteStore {
 
   sourceAttempts(): SourceAttemptRepository {
     return new SqliteSourceAttemptRepository(() => this.database());
+  }
+
+  commitmentCandidates(): CommitmentCandidateRepository {
+    return new SqliteCommitmentCandidateRepository(() => this.database());
+  }
+
+  commitmentEvents(): CommitmentEventRepository {
+    return new SqliteCommitmentEventRepository(() => this.database());
+  }
+
+  workspaceCommitments(): WorkspaceCommitmentRepository {
+    return new SqliteWorkspaceCommitmentRepository(() => this.database());
   }
 
   sources(): SourceRepository {
@@ -778,6 +820,79 @@ class SqliteSourceAttemptRepository implements SourceAttemptRepository {
         ON CONFLICT(feed_id, id) DO NOTHING
       `)
       .run(attempt.feedId, attempt.id, attempt.sourceId, attempt.outcome, attempt.completedAt, JSON.stringify(attempt));
+  }
+}
+
+class SqliteCommitmentCandidateRepository implements CommitmentCandidateRepository {
+  constructor(private readonly database: () => Database) {}
+  async init(): Promise<void> {}
+  async list(): Promise<CommitmentCandidate[]> {
+    return (this.database().query("SELECT payload_json FROM commitment_candidates ORDER BY created_at ASC, id ASC").all() as Array<{ payload_json: string }>)
+      .map((row) => JSON.parse(row.payload_json) as CommitmentCandidate);
+  }
+  async get(id: string): Promise<CommitmentCandidate> {
+    const row = this.database().query("SELECT payload_json FROM commitment_candidates WHERE id = ?").get(id) as { payload_json: string } | undefined;
+    if (!row) throw new Error(`Commitment candidate not found: ${id}`);
+    return JSON.parse(row.payload_json) as CommitmentCandidate;
+  }
+  async write(candidate: CommitmentCandidate): Promise<void> {
+    this.database().query(`
+      INSERT INTO commitment_candidates (id, feed_id, status, created_at, payload_json)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET status = excluded.status, payload_json = excluded.payload_json
+    `).run(candidate.id, candidate.feedId, candidate.status, candidate.createdAt, JSON.stringify(candidate));
+  }
+}
+
+class SqliteWorkspaceCommitmentRepository implements WorkspaceCommitmentRepository {
+  constructor(private readonly database: () => Database) {}
+  async init(): Promise<void> {}
+  async list(): Promise<WorkspaceCommitment[]> {
+    return (this.database().query("SELECT payload_json FROM workspace_commitments ORDER BY updated_at ASC, id ASC").all() as Array<{ payload_json: string }>)
+      .map((row) => JSON.parse(row.payload_json) as WorkspaceCommitment);
+  }
+  async get(id: string): Promise<WorkspaceCommitment> {
+    const row = this.database().query("SELECT payload_json FROM workspace_commitments WHERE id = ?").get(id) as { payload_json: string } | undefined;
+    if (!row) throw new Error(`Workspace commitment not found: ${id}`);
+    return JSON.parse(row.payload_json) as WorkspaceCommitment;
+  }
+  async findByDeduplicationKey(key: string): Promise<WorkspaceCommitment | null> {
+    const row = this.database().query("SELECT payload_json FROM workspace_commitments WHERE deduplication_key = ?").get(key) as { payload_json: string } | undefined;
+    return row ? JSON.parse(row.payload_json) as WorkspaceCommitment : null;
+  }
+  async write(commitment: WorkspaceCommitment, expectedVersion?: number): Promise<void> {
+    const current = this.database().query("SELECT version FROM workspace_commitments WHERE id = ?").get(commitment.id) as { version: number } | undefined;
+    if (expectedVersion !== undefined && current?.version !== expectedVersion) throw new Error("Commitment version changed; refresh and retry.");
+    this.database().query(`
+      INSERT INTO workspace_commitments (id, deduplication_key, owner_feed_id, owner_card_id, status, version, updated_at, payload_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        deduplication_key = excluded.deduplication_key,
+        owner_feed_id = excluded.owner_feed_id,
+        owner_card_id = excluded.owner_card_id,
+        status = excluded.status,
+        version = excluded.version,
+        updated_at = excluded.updated_at,
+        payload_json = excluded.payload_json
+    `).run(commitment.id, commitment.deduplicationKey, commitment.owner.feedId, commitment.owner.cardId, commitment.status, commitment.version, commitment.updatedAt, JSON.stringify(commitment));
+  }
+}
+
+class SqliteCommitmentEventRepository implements CommitmentEventRepository {
+  constructor(private readonly database: () => Database) {}
+  async init(): Promise<void> {}
+  async list(commitmentId?: string): Promise<CommitmentEvent[]> {
+    const rows = commitmentId === undefined
+      ? this.database().query("SELECT payload_json FROM commitment_events ORDER BY at ASC, id ASC").all()
+      : this.database().query("SELECT payload_json FROM commitment_events WHERE commitment_id = ? ORDER BY at ASC, id ASC").all(commitmentId);
+    return (rows as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as CommitmentEvent);
+  }
+  async append(event: CommitmentEvent): Promise<void> {
+    this.database().query(`
+      INSERT INTO commitment_events (id, commitment_id, type, at, payload_json)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO NOTHING
+    `).run(event.id, event.commitmentId, event.type, event.at, JSON.stringify(event));
   }
 }
 

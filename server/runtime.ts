@@ -15,6 +15,9 @@ import { FileSweepRepository, MirroredSweepRepository } from "./repositories/swe
 import { FileTextDocumentRepository, MirroredTextDocumentRepository } from "./repositories/textDocuments";
 import { FileWorkItemRepository, MirroredWorkItemRepository } from "./repositories/workItems";
 import { FileWorkspaceFeedRepository, MirroredWorkspaceFeedRepository } from "./repositories/workspaceFeeds";
+import { FileCommitmentCandidateRepository, MirroredCommitmentCandidateRepository } from "./repositories/commitmentCandidates";
+import { FileCommitmentEventRepository, MirroredCommitmentEventRepository } from "./repositories/commitmentEvents";
+import { FileWorkspaceCommitmentRepository, MirroredWorkspaceCommitmentRepository } from "./repositories/workspaceCommitments";
 import { LocalSqliteStore } from "./sqlite";
 import { AttentionStore } from "./store";
 
@@ -45,6 +48,19 @@ export async function createLocalRuntime(
   const workspaceFeeds = new MirroredWorkspaceFeedRepository(
     sqlite.workspaceFeeds(),
     new FileWorkspaceFeedRepository(path.join(dataDir, "workspace.json")),
+  );
+  const commitmentCandidates = new MirroredCommitmentCandidateRepository(
+    sqlite.commitmentCandidates(),
+    new FileCommitmentCandidateRepository(dataDir),
+  );
+  const commitmentEvents = new MirroredCommitmentEventRepository(
+    sqlite.commitmentEvents(),
+    new FileCommitmentEventRepository(dataDir),
+    mirrorWrites,
+  );
+  const workspaceCommitments = new MirroredWorkspaceCommitmentRepository(
+    sqlite.workspaceCommitments(),
+    new FileWorkspaceCommitmentRepository(dataDir),
   );
   const events = new MirroredFeedEventRepository(
     sqlite.feedEvents(),
@@ -103,6 +119,8 @@ export async function createLocalRuntime(
   );
   const store = new AttentionStore(dataDir, {
     cards,
+    commitmentCandidates,
+    commitmentEvents,
     events,
     mindContext,
     mobileCommandReceipts,
@@ -115,6 +133,7 @@ export async function createLocalRuntime(
     sweeps,
     textDocuments,
     workItems,
+    workspaceCommitments,
     workspaceFeeds,
   });
   await store.init();

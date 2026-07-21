@@ -160,6 +160,86 @@ export interface WorkspaceCoverage {
   sources: SourceCoverage[];
 }
 
+export type CommitmentExplicitness = "explicit_first_person_bounded" | "implied" | "ambiguous";
+export type CommitmentSignalKind = "email" | "calendar" | "slack" | "teams" | "meeting_note" | "message" | "custom";
+export type CommitmentLifecycle =
+  | "open"
+  | "waiting"
+  | "scheduled"
+  | "completion_pending"
+  | "fulfilled"
+  | "withdrawn"
+  | "superseded"
+  | "reopened";
+
+export interface CommitmentSignalRef {
+  id: string;
+  feedId: FeedId;
+  sourceId: string;
+  sourceRunId: string;
+  snapshotId: string;
+  kind: CommitmentSignalKind;
+  observedAt: string;
+  certainty: number;
+  explicitness: CommitmentExplicitness;
+}
+
+export interface NormalizedCommitment {
+  promise: string;
+  deliverable?: string;
+  owner?: string;
+  dueAt?: string;
+}
+
+export interface CommitmentCandidateInput {
+  sourceId: string;
+  sourceRunId: string;
+  snapshotId: string;
+  signalKind: CommitmentSignalKind;
+  deduplicationKey: string;
+  explicitness: CommitmentExplicitness;
+  certainty: number;
+  normalized: NormalizedCommitment;
+  judgmentPolicyVersion: string;
+  sourceClass: string;
+  qualityGatePassed: boolean;
+  ownerHint: { feedId: FeedId; cardId?: string };
+}
+
+export interface CommitmentCandidate extends CommitmentCandidateInput {
+  id: string;
+  feedId: FeedId;
+  signal: CommitmentSignalRef;
+  status: "pending_confirmation" | "accepted" | "rejected" | "linked";
+  commitmentId?: string;
+  confirmationCard?: { feedId: FeedId; cardId: string };
+  createdAt: string;
+  decidedAt?: string;
+}
+
+export interface WorkspaceCommitment {
+  id: string;
+  version: number;
+  deduplicationKey: string;
+  owner: { feedId: FeedId; cardId: string };
+  promise: string;
+  deliverable?: string;
+  dueAt?: string;
+  certainty: number;
+  status: CommitmentLifecycle;
+  signals: CommitmentSignalRef[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CommitmentEvent {
+  id: string;
+  commitmentId: string;
+  type: "created" | "signal_linked" | "candidate_confirmed" | "candidate_rejected" | "lifecycle_changed" | "split" | "owner_changed";
+  at: string;
+  detail: Record<string, unknown>;
+}
+
 export interface ThreadBinding {
   homeThreadId: string | null;
   boundAt: string | null;
@@ -426,6 +506,7 @@ export interface Card {
   sourceMailbox?: string;
   sourceRunIds?: string[];
   contextInfluence?: CardContextInfluence;
+  commitmentId?: string;
   blocks: CardBlock[];
   proposedAction?: ProposedAction;
   actions?: CardAction[];

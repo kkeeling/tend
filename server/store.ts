@@ -7,6 +7,8 @@ import type {
   AgentWakeLine,
   AppFeedback,
   Card,
+  CommitmentCandidate,
+  CommitmentEvent,
   DictationCapability,
   DrainState,
   FeedConfig,
@@ -28,6 +30,7 @@ import type {
   WorkItem,
   WorkItemView,
   WorkspaceRevision,
+  WorkspaceCommitment,
   WorkspaceCoverage,
   WorkspaceView,
 } from "../shared/types";
@@ -59,6 +62,9 @@ import { FileSweepRepository, type SweepRepository } from "./repositories/sweeps
 import { FileTextDocumentRepository, type TextDocumentRepository, type TextDocumentSeed } from "./repositories/textDocuments";
 import { FileWorkItemRepository, type WorkItemRepository } from "./repositories/workItems";
 import { FileWorkspaceFeedRepository, type WorkspaceFeedRepository } from "./repositories/workspaceFeeds";
+import { FileCommitmentCandidateRepository, type CommitmentCandidateRepository } from "./repositories/commitmentCandidates";
+import { FileCommitmentEventRepository, type CommitmentEventRepository } from "./repositories/commitmentEvents";
+import { FileWorkspaceCommitmentRepository, type WorkspaceCommitmentRepository } from "./repositories/workspaceCommitments";
 import type { MobileCommandReceipt } from "../shared/mobile";
 import { projectCoverage } from "./workflow/coverage";
 
@@ -94,6 +100,8 @@ export class AttentionStore {
   readonly dataDir: string;
   private tail = Promise.resolve();
   private readonly cards: CardRepository;
+  private readonly commitmentCandidates: CommitmentCandidateRepository;
+  private readonly commitmentEvents: CommitmentEventRepository;
   private readonly events: FeedEventRepository;
   private readonly mindContext: MindContextRepository;
   private readonly mobileCommandReceipts: MobileCommandReceiptRepository;
@@ -106,12 +114,15 @@ export class AttentionStore {
   private readonly textDocuments: TextDocumentRepository;
   private readonly workItems: WorkItemRepository;
   private readonly workspaceFeeds: WorkspaceFeedRepository;
+  private readonly workspaceCommitments: WorkspaceCommitmentRepository;
   private readonly runAtomic?: AtomicRunner;
   private readonly agentWakeSeq = new Map<AgentPresence["agent"], number>();
 
-  constructor(dataDir: string, options: { cards?: CardRepository; events?: FeedEventRepository; mindContext?: MindContextRepository; mobileCommandReceipts?: MobileCommandReceiptRepository; revisions?: RevisionRepository; routineActionGroups?: RoutineActionGroupRepository; sourceAttempts?: SourceAttemptRepository; sourceRuns?: SourceRunRepository; sources?: SourceRepository; sweeps?: SweepRepository; textDocuments?: TextDocumentRepository; workItems?: WorkItemRepository; workspaceFeeds?: WorkspaceFeedRepository; runAtomic?: AtomicRunner } = {}) {
+  constructor(dataDir: string, options: { cards?: CardRepository; commitmentCandidates?: CommitmentCandidateRepository; commitmentEvents?: CommitmentEventRepository; events?: FeedEventRepository; mindContext?: MindContextRepository; mobileCommandReceipts?: MobileCommandReceiptRepository; revisions?: RevisionRepository; routineActionGroups?: RoutineActionGroupRepository; sourceAttempts?: SourceAttemptRepository; sourceRuns?: SourceRunRepository; sources?: SourceRepository; sweeps?: SweepRepository; textDocuments?: TextDocumentRepository; workItems?: WorkItemRepository; workspaceCommitments?: WorkspaceCommitmentRepository; workspaceFeeds?: WorkspaceFeedRepository; runAtomic?: AtomicRunner } = {}) {
     this.dataDir = dataDir;
     this.cards = options.cards ?? new FileCardRepository(this.dataDir);
+    this.commitmentCandidates = options.commitmentCandidates ?? new FileCommitmentCandidateRepository(this.dataDir);
+    this.commitmentEvents = options.commitmentEvents ?? new FileCommitmentEventRepository(this.dataDir);
     this.events = options.events ?? new FileFeedEventRepository(this.dataDir);
     this.mindContext = options.mindContext ?? new FileMindContextRepository(this.dataDir);
     this.mobileCommandReceipts = options.mobileCommandReceipts ?? new FileMobileCommandReceiptRepository(this.dataDir);
@@ -124,6 +135,7 @@ export class AttentionStore {
     this.textDocuments = options.textDocuments ?? new FileTextDocumentRepository(this.dataDir);
     this.workItems = options.workItems ?? new FileWorkItemRepository(this.dataDir);
     this.workspaceFeeds = options.workspaceFeeds ?? new FileWorkspaceFeedRepository(this.path("workspace.json"));
+    this.workspaceCommitments = options.workspaceCommitments ?? new FileWorkspaceCommitmentRepository(this.dataDir);
     this.runAtomic = options.runAtomic;
   }
 
@@ -137,6 +149,8 @@ export class AttentionStore {
     await this.textDocuments.init();
     await this.ensureTextDocumentSeeds(this.globalTextDocumentSeeds());
     await this.cards.init(feedIds);
+    await this.commitmentCandidates.init();
+    await this.commitmentEvents.init();
     await this.events.init(feedIds);
     await this.mindContext.init();
     await this.mobileCommandReceipts.init();
@@ -147,6 +161,7 @@ export class AttentionStore {
     await this.sources.init(feedIds);
     await this.sweeps.init(feedIds);
     await this.workItems.init(feedIds);
+    await this.workspaceCommitments.init();
     await this.ensureDefaultFeed("inbox");
     await this.ensureDefaultFeed("company-attention");
     await Promise.all((await this.workspaceFeeds.listFeedIds()).map((feedId) => this.ensureFeedTextDocuments(feedId)));
@@ -190,6 +205,16 @@ export class AttentionStore {
   async listFeedIds(): Promise<string[]> {
     return this.workspaceFeeds.listFeedIds();
   }
+
+  async listCommitmentCandidates(): Promise<CommitmentCandidate[]> { return this.commitmentCandidates.list(); }
+  async readCommitmentCandidate(id: string): Promise<CommitmentCandidate> { return this.commitmentCandidates.get(id); }
+  async writeCommitmentCandidate(candidate: CommitmentCandidate): Promise<void> { await this.commitmentCandidates.write(candidate); }
+  async listWorkspaceCommitments(): Promise<WorkspaceCommitment[]> { return this.workspaceCommitments.list(); }
+  async readWorkspaceCommitment(id: string): Promise<WorkspaceCommitment> { return this.workspaceCommitments.get(id); }
+  async findWorkspaceCommitmentByKey(key: string): Promise<WorkspaceCommitment | null> { return this.workspaceCommitments.findByDeduplicationKey(key); }
+  async writeWorkspaceCommitment(commitment: WorkspaceCommitment, expectedVersion?: number): Promise<void> { await this.workspaceCommitments.write(commitment, expectedVersion); }
+  async listCommitmentEvents(commitmentId?: string): Promise<CommitmentEvent[]> { return this.commitmentEvents.list(commitmentId); }
+  async appendCommitmentEvent(event: CommitmentEvent): Promise<void> { await this.commitmentEvents.append(event); }
 
   async setFeedOrder(feedIds: string[]): Promise<void> {
     const current = await this.workspaceFeeds.listFeedIds();
