@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseOptionalWorkAgent } from "../../shared/lanes";
-import type { PostActionCompletion, VoiceTarget } from "../../shared/types";
+import type { PostActionCompletion, PriorityRuleDefinition, VoiceTarget } from "../../shared/types";
 import { mindContextPublicationReceipt } from "../domain";
 import { versionInfo } from "../version";
 import { body, mutation, mutationAccessError, type LocalRouteContext } from "./shared";
@@ -23,6 +23,10 @@ export function apiRoutes(context: LocalRouteContext): Hono {
   });
   app.get("/api/status", (c) => c.json({ ok: true, version: versionInfo(), dataDir, sqlite: sqlite.status() }));
   app.get("/api/state", async (c) => c.json(await store.readWorkspace(c.req.query("feed") ?? "inbox")));
+  app.get("/api/workspace", async (c) => c.json(await store.readWorkspaceControlPlane()));
+  app.get("/api/workspace/now", async (c) => c.json((await store.readWorkspaceControlPlane()).now));
+  app.get("/api/workspace/coverage", async (c) => c.json((await store.readWorkspaceControlPlane()).coverage));
+  app.get("/api/workspace/priority", async (c) => c.json((await store.readWorkspaceControlPlane()).priority));
   app.get("/api/health", (c) => c.json({ ok: true }));
   app.get("/api/mobile/status", (c) => c.json(mobileStatus?.() ?? { enabled: false }));
   app.get("/api/mind-context/current", async (c) => {
@@ -105,6 +109,32 @@ export function apiRoutes(context: LocalRouteContext): Hono {
       assignee: parseOptionalWorkAgent(input.assignee),
     });
   }));
+  app.post("/api/workspace/instructions", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    const cardRef = input.cardRef && typeof input.cardRef === "object" ? input.cardRef as { feedId?: unknown; cardId?: unknown } : {};
+    return domain.queueWorkspaceInstruction({
+      cardRef: { feedId: String(cardRef.feedId ?? ""), cardId: String(cardRef.cardId ?? "") },
+      instruction: String(input.instruction ?? ""),
+      ...(typeof input.commitmentId === "string" ? { commitmentId: input.commitmentId } : {}),
+      ...(typeof input.expectedCommitmentVersion === "number" ? { expectedCommitmentVersion: input.expectedCommitmentVersion } : {}),
+      ...(parseOptionalWorkAgent(input.assignee) ? { assignee: parseOptionalWorkAgent(input.assignee) } : {}),
+    });
+  }));
+  app.post("/api/workspace/commitment-candidates/:candidate/confirm", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    if (typeof input.accept !== "boolean") throw new Error("Commitment confirmation requires an explicit boolean accept value.");
+    return domain.confirmCommitmentCandidate(c.req.param("candidate"), input.accept);
+  }));
+  app.post("/api/workspace/priority/corrections", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.recordPriorityCorrection({
+      preferredCommitmentId: String(input.preferredCommitmentId ?? ""),
+      overCommitmentId: String(input.overCommitmentId ?? ""),
+      reason: String(input.reason ?? ""),
+      proposedRules: input.proposedRules as PriorityRuleDefinition,
+    });
+  }));
+  app.post("/api/workspace/priority/proposals/:proposal/approve", async (c) => mutation(c, notify, async () => domain.approvePriorityRuleProposal(c.req.param("proposal"))));
   app.post("/api/revision-proposals/:proposal/apply", async (c) => mutation(c, notify, async () => domain.applyRevisionProposal(c.req.param("proposal"))));
   app.post("/api/revision-proposals/:proposal/reject", async (c) => mutation(c, notify, async () => domain.rejectRevisionProposal(c.req.param("proposal"))));
   app.post("/api/revision-proposals/:proposal", async (c) => mutation(c, notify, async () => domain.updateRevisionProposal(c.req.param("proposal"), String((await body(c)).content ?? ""))));

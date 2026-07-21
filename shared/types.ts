@@ -302,6 +302,38 @@ export interface WorkspaceNowRow {
   evaluatedAt: string;
 }
 
+export interface WorkspaceNowItem {
+  id: string;
+  cardRef: { feedId: FeedId; cardId: string };
+  card: Card;
+  commitment?: WorkspaceCommitment;
+  priority: {
+    rank: number;
+    score: number;
+    explanation: string;
+    overrideReason?: string;
+    ruleSetId?: string;
+    ruleVersion?: number;
+    judgmentPolicyVersion?: string;
+    evaluationDigest?: string;
+  };
+}
+
+export interface WorkspaceControlPlane {
+  now: {
+    asOf: string;
+    allClear: boolean;
+    message: string;
+    items: WorkspaceNowItem[];
+  };
+  coverage: WorkspaceCoverage;
+  priority: {
+    activeRules: PriorityRuleSet | null;
+    proposals: PriorityRuleProposal[];
+    ledger: PriorityLedgerEntry[];
+  };
+}
+
 export interface ThreadBinding {
   homeThreadId: string | null;
   boundAt: string | null;

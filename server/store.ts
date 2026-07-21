@@ -34,6 +34,7 @@ import type {
   WorkItemView,
   WorkspaceRevision,
   WorkspaceCommitment,
+  WorkspaceControlPlane,
   WorkspaceNowRow,
   WorkspaceCoverage,
   WorkspaceView,
@@ -216,6 +217,87 @@ export class AttentionStore {
     ))).flat();
     const attempts = (await Promise.all(feedIds.map((feedId) => this.sourceAttempts.list(feedId)))).flat();
     return projectCoverage(records, attempts, now);
+  }
+
+  async readWorkspaceControlPlane(now = new Date()): Promise<WorkspaceControlPlane> {
+    const coverage = await this.readWorkspaceCoverage(now);
+    const feedIds = await this.workspaceFeeds.listFeedIds();
+    const cardSets = await Promise.all(feedIds.map(async (feedId) => {
+      const config = await this.readConfig(feedId);
+      const cards = (await this.cards.list(feedId)).filter((card) =>
+        card.kind === "attention"
+        && card.status !== "done"
+        && card.readyForPass <= config.currentPass
+        && !card.sweep?.hidden,
+      );
+      return cards;
+    }));
+    const cards = cardSets.flat();
+    const commitments = await this.workspaceCommitments.list();
+    const commitmentById = new Map(commitments.map((item) => [item.id, item]));
+    const projection = await this.workspaceNowProjection.list();
+    const priorityByCard = new Map(projection.map((row) => [row.id, row]));
+    const statusScore: Record<Card["status"], number> = {
+      approved_blocked: 750,
+      working: 700,
+      queued: 650,
+      to_review_updated: 550,
+      to_review_new: 500,
+      done: 0,
+    };
+    const ranked = cards.map((card) => {
+      const id = `${card.feedId}:${card.id}`;
+      const row = priorityByCard.get(id);
+      const commitment = card.commitmentId ? commitmentById.get(card.commitmentId) : undefined;
+      return {
+        id,
+        cardRef: { feedId: card.feedId, cardId: card.id },
+        card,
+        ...(commitment ? { commitment } : {}),
+        priority: row ? {
+          rank: row.rank,
+          score: row.score,
+          explanation: row.explanation,
+          ...(row.overrideReason ? { overrideReason: row.overrideReason } : {}),
+          ruleSetId: row.ruleSetId,
+          ruleVersion: row.ruleVersion,
+          judgmentPolicyVersion: row.judgmentPolicyVersion,
+          evaluationDigest: row.inputDigest,
+        } : {
+          rank: Number.MAX_SAFE_INTEGER,
+          score: statusScore[card.status],
+          explanation: `Existing ${card.status.replaceAll("_", " ")} attention card from ${card.feedId}.`,
+        },
+      };
+    }).sort((left, right) => {
+      const leftProjected = left.priority.rank !== Number.MAX_SAFE_INTEGER;
+      const rightProjected = right.priority.rank !== Number.MAX_SAFE_INTEGER;
+      if (leftProjected !== rightProjected) return leftProjected ? -1 : 1;
+      return left.priority.rank - right.priority.rank
+        || right.priority.score - left.priority.score
+        || right.card.updatedAt.localeCompare(left.card.updatedAt)
+        || left.id.localeCompare(right.id);
+    }).map((item, index) => ({ ...item, priority: { ...item.priority, rank: index + 1 } }));
+
+    const allClear = ranked.length === 0 && coverage.allClear;
+    return {
+      now: {
+        asOf: now.toISOString(),
+        allClear,
+        message: ranked.length
+          ? `${ranked.length} item${ranked.length === 1 ? " needs" : "s need"} attention.`
+          : allClear
+            ? "No attention items remain, and all required sources are coverage-complete."
+            : `No attention items are visible, but Tend cannot certify an all-clear. ${coverage.caveat}`,
+        items: ranked,
+      },
+      coverage,
+      priority: {
+        activeRules: await this.priorityRules.active(),
+        proposals: await this.priorityRules.listProposals(),
+        ledger: await this.priorityLedger.list(),
+      },
+    };
   }
 
   async listFeedIds(): Promise<string[]> {

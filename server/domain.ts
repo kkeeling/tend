@@ -1079,6 +1079,30 @@ export class AttentionDomain {
     return target;
   }
 
+  async queueWorkspaceInstruction(input: {
+    cardRef: { feedId: string; cardId: string };
+    instruction: string;
+    commitmentId?: string;
+    expectedCommitmentVersion?: number;
+    assignee?: WorkAgent;
+  }) {
+    if (input.commitmentId) {
+      const commitment = await this.store.readWorkspaceCommitment(input.commitmentId);
+      if (commitment.owner.feedId !== input.cardRef.feedId || commitment.owner.cardId !== input.cardRef.cardId) {
+        throw new Error("The workspace item owner changed; refresh Now before queueing work.");
+      }
+      if (input.expectedCommitmentVersion !== undefined && commitment.version !== input.expectedCommitmentVersion) {
+        throw new Error("The workspace commitment changed; refresh Now before queueing work.");
+      }
+    }
+    return this.submitVoiceInstruction(
+      input.cardRef.feedId,
+      { kind: "card", feedId: input.cardRef.feedId, cardId: input.cardRef.cardId },
+      input.instruction,
+      { ...(input.assignee ? { assignee: input.assignee } : {}) },
+    );
+  }
+
   async submitVoiceInstruction(anchorFeedId: string, requested: VoiceTarget, instruction: string, options: { assignee?: WorkAgent } = {}) {
     if (!instruction.trim()) throw new Error("Instruction is required.");
     const target = await this.store.validateVoiceTarget(requested);

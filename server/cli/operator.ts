@@ -62,6 +62,23 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
       case "state":
         output = await store.readWorkspace(value("feed"));
         break;
+      case "workspace:now":
+        output = (await store.readWorkspaceControlPlane()).now;
+        break;
+      case "workspace:coverage":
+        output = (await store.readWorkspaceControlPlane()).coverage;
+        break;
+      case "workspace:priority":
+        output = (await store.readWorkspaceControlPlane()).priority;
+        break;
+      case "workspace:instruct":
+        output = await domain.queueWorkspaceInstruction({
+          cardRef: { feedId: required("feed"), cardId: required("card") },
+          instruction: required("instruction"),
+          ...(value("commitment") ? { commitmentId: value("commitment") } : {}),
+          ...(value("version") ? { expectedCommitmentVersion: Number(value("version")) } : {}),
+        });
+        break;
       case "setup:detect-monologue":
         output = await domain.detectLocalMonologue();
         break;
@@ -164,6 +181,20 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
           required("status") as CommitmentLifecycle,
           required("reason"),
         );
+        break;
+      case "priority:rules:activate":
+        output = await domain.activateInitialPriorityRules(json(required("rules")), required("reason"));
+        break;
+      case "priority:correction":
+        output = await domain.recordPriorityCorrection({
+          preferredCommitmentId: required("preferred"),
+          overCommitmentId: required("over"),
+          reason: required("reason"),
+          proposedRules: json(required("rules")),
+        });
+        break;
+      case "priority:proposal:approve":
+        output = await domain.approvePriorityRuleProposal(required("proposal"));
         break;
       case "sweep:record-batch":
         output = await domain.recordSweepBatch(
