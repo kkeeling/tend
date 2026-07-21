@@ -39,7 +39,17 @@ ATTENTION_HOME=/path/to/attention tend start
 
 ## Connector Credentials
 
-Tend does not store Gmail, GitHub, Slack, browser, or other connector credentials. Those live in the local Codex Desktop runtime.
+Tend does not store Gmail, Outlook, calendar, GitHub, Slack, Teams, Granola, browser, or other
+connector credentials. Those live in the local connector runtime or an OS credential store.
+
+## iMessage/SMS Source Boundary
+
+The optional `tend-imessage-helper` reads the fixed local Messages database directly and emits a
+minimized local projection: stable message/thread identifiers, timestamp, direction, service,
+sender/thread labels when present, and bounded text. It does not collect attachments, expose the
+database path, accept arbitrary SQL, or offer outbound operations. The main Tend server does not
+need Full Disk Access. Imported projections and any resulting raw snapshots remain normal private
+Tend evidence under `ATTENTION_HOME`; never commit them to Git.
 
 ## Backup
 

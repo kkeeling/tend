@@ -57,7 +57,8 @@ pnpm tend:smoke
 ./dist-bin/tend start
 ```
 
-The binary starts the local app in the background and serves built UI assets and API from
+The build produces `tend` plus a separate least-privilege `tend-imessage-helper`. The Tend binary
+starts the local app in the background and serves built UI assets and API from
 `http://127.0.0.1:4332`.
 
 ```sh
@@ -78,7 +79,7 @@ pnpm tend:package
 
 The package command writes `dist-bin/releases/tend-<version>-<platform>-<arch>.tar.gz` plus a
 `.sha256` checksum. The archive contains the `tend` executable, the Tend manual, built `dist/` UI
-assets, README, license, contributor notes, all public
+assets, the dedicated read-only iMessage helper, README, license, contributor notes, all public
 install/architecture/agent/data/development/iPhone/security/releasing docs, the changelog, and
 operator/capability references.
 The packaged executable resolves UI assets from the sibling `dist/` directory, so it can be launched
@@ -92,6 +93,21 @@ explicitly from Finder or by removing the quarantine attribute:
 xattr -d com.apple.quarantine ./tend
 ./tend start
 ```
+
+## Optional iMessage/SMS Read Access
+
+The main Tend server never opens `~/Library/Messages/chat.db`. The packaged
+`tend-imessage-helper` is the only process that does. It supports one command, a bounded read:
+
+```sh
+./tend-imessage-helper collect --since 2026-07-20T00:00:00Z --limit 200
+```
+
+On macOS, grant Full Disk Access to this helper only when you choose to enable the iMessage source.
+Do not grant it to the main Tend server. The helper accepts no database path or SQL argument, opens
+only the fixed Messages database read-only, caps lookback at 90 days and output at 500 messages,
+and has no send/delete command. A denial is recorded as `permission_denied`; it is never treated as
+successful coverage.
 
 ## Codex Setup
 

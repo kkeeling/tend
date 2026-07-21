@@ -16,7 +16,7 @@
     "test": "bun test",
     "seed:demo": "bun tend.ts cli demo:seed",
     "tend": "bun tend.ts",
-    "tend:build": "bun scripts/clean-legacy-cli-artifacts.ts && bun build ./tend.ts --compile --outfile dist-bin/tend",
+    "tend:build": "bun scripts/clean-legacy-cli-artifacts.ts && bun build ./tend.ts --compile --outfile dist-bin/tend && bun build ./imessage-helper.ts --compile --outfile dist-bin/tend-imessage-helper",
     "tend:smoke": "bun scripts/smoke-binary.ts",
     "tend:package": "bun scripts/clean-legacy-cli-artifacts.ts && bun scripts/package-binary.ts"
   },

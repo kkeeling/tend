@@ -49,6 +49,14 @@ The built-in filter removes common secrets, email addresses, long account number
 paths. It is defense in depth, not a substitute for source restraint: publishers must include only
 short windows that support a published signal.
 
+## iMessage/SMS Helper
+
+- Full Disk Access belongs only to the optional `tend-imessage-helper`, never the main Tend server.
+- The helper opens only `~/Library/Messages/chat.db` with SQLite read-only and `query_only` controls.
+- Its CLI exposes one bounded `collect` operation, no arbitrary path/query, and no send/delete API.
+- A fixed parameterized query returns a minimized projection and omits attachments. Permission and
+  schema failures become explicit degraded coverage outcomes and never advance a source checkpoint.
+
 ## iPhone And Supabase
 
 - SQLite on the Mac remains authoritative; Supabase is a disposable private projection and command

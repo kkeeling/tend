@@ -59,7 +59,7 @@ import { isReservedCardActionId, safeConfiguredCardActions } from "../shared/car
 import { containsFullEmail } from "../shared/emailThread";
 import { agentLabel, effectiveWorkLane } from "../shared/lanes";
 import { agentPresenceLiveness, AttentionStore, FEED_PROMPT_NAMES, workItemView } from "./store";
-import { demoCards, feedConfig } from "./templates";
+import { demoCards, feedConfig, providerSourceRecipe } from "./templates";
 import { detectMonologue } from "./monologue";
 import { digest, isoNow, makeId, makeToken, safeIdentifier, slugify } from "./util";
 import { actionDigest, cleanupDigest, configuredApprovalAction, requiredSourceMailbox, routineActionDigest, verifySourceMailbox } from "./workflow/approvals";
@@ -2773,7 +2773,12 @@ export class AttentionDomain {
       actionCapabilities: [...input.actionCapabilities],
       ...(input.scopeSummary?.trim() ? { scopeSummary: input.scopeSummary.trim() } : {}),
     };
-    return this.store.serialize(() => this.store.writeSourceProfile(feedId, sourceId, profile));
+    return this.store.serialize(async () => {
+      const recipe = await this.store.writeSourceProfile(feedId, sourceId, profile);
+      const guidance = providerSourceRecipe({ id: recipe.id, name: recipe.name, summary: recipe.summary, profile });
+      await this.store.writeSourceRecipe(feedId, sourceId, guidance.markdown);
+      return recipe;
+    });
   }
 
   async upsertCard(feedId: string, input: Partial<Card> & Pick<Card, "id" | "title" | "why" | "blocks">): Promise<Card> {
