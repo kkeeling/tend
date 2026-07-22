@@ -14,6 +14,13 @@ type CommandResult = {
   stderr: string;
 };
 
+class IMessageHelperTimeoutError extends Error {
+  constructor() {
+    super("The Messages helper did not return a complete JSON result before the timeout.");
+    this.name = "IMessageHelperTimeoutError";
+  }
+}
+
 export type IMessageLaunchdDependencies = {
   platform?: string;
   helperPath?: string;
@@ -57,15 +64,21 @@ export async function collectIMessageViaLaunchd(
   const timeoutMs = dependencies.timeoutMs ?? 30_000;
 
   for (let index = 0; index < helperPaths.length; index += 1) {
-    const result = await collectWithHelper({
-      helperPath: helperPaths[index]!,
-      helperArguments,
-      temporaryRoot,
-      timeoutMs,
-      now,
-      sleep,
-      run,
-    });
+    let result: Record<string, unknown>;
+    try {
+      result = await collectWithHelper({
+        helperPath: helperPaths[index]!,
+        helperArguments,
+        temporaryRoot,
+        timeoutMs,
+        now,
+        sleep,
+        run,
+      });
+    } catch (error) {
+      if (!(error instanceof IMessageHelperTimeoutError) || index === helperPaths.length - 1) throw error;
+      continue;
+    }
     if (result.outcome !== "permission_denied" || index === helperPaths.length - 1) return result;
   }
   throw new Error("No packaged Messages helper candidate returned a result.");
@@ -117,7 +130,7 @@ async function collectWithHelper(options: {
       if (result) return result;
       await sleep(25);
     }
-    throw new Error("The Messages helper did not return a complete JSON result before the timeout.");
+    throw new IMessageHelperTimeoutError();
   } finally {
     try {
       await removeLaunchdJob(run, label);

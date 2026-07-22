@@ -145,6 +145,47 @@ describe("packaged Messages launchd runner", () => {
     expect((await readdir(root)).sort()).toEqual(["tend-current", "tend-previous"]);
   });
 
+  test("reuses a byte-identical prior helper when the current package path never returns", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "tend-imessage-timeout-fallback-test-"));
+    roots.push(root);
+    const current = path.join(root, "tend-current", "tend-imessage-helper");
+    const previous = path.join(root, "tend-previous", "tend-imessage-helper");
+    await Promise.all([mkdir(path.dirname(current)), mkdir(path.dirname(previous))]);
+    await Promise.all([
+      writeFile(current, "identical-helper", { mode: 0o700 }),
+      writeFile(previous, "identical-helper", { mode: 0o700 }),
+    ]);
+    const commands: string[][] = [];
+    let now = Date.parse("2026-07-22T00:00:00Z");
+    const result = await collectIMessageViaLaunchd([
+      "collect",
+      "--since",
+      "2026-07-21T00:00:00Z",
+    ], {
+      platform: "darwin",
+      helperPath: current,
+      helperPaths: [current, previous],
+      temporaryRoot: root,
+      timeoutMs: 50,
+      now: () => now,
+      sleep: async (milliseconds) => { now += milliseconds; },
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "submit" && command[command.indexOf("-p") + 1] === previous) {
+          const output = command[command.indexOf("-o") + 1]!;
+          await writeFile(output, `${JSON.stringify({ ok: true, schema: "tend.imessage.readonly.v1", messages: [] })}\n`);
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    expect(result).toMatchObject({ ok: true, schema: "tend.imessage.readonly.v1" });
+    expect(commands.filter((command) => command[1] === "submit").map((command) => command[command.indexOf("-p") + 1]))
+      .toEqual([current, previous]);
+    expect(commands.filter((command) => command[1] === "remove")).toHaveLength(2);
+    expect((await readdir(root)).sort()).toEqual(["tend-current", "tend-previous"]);
+  });
+
   test("allows fallback candidates only when their bytes match the current packaged helper", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "tend-imessage-candidate-test-"));
     roots.push(root);

@@ -17,6 +17,11 @@ a promise of ongoing maintenance.
   across the shared types, mobile projection, Swift models, and iOS controls, swipes, and activity.
 - Advance the CLI contract to `0.4` with the clearer, intentionally breaking card disposition names.
 
+## 0.3.0-keeling.4 - 2026-07-21
+
+- Retry a prior installed, byte-identical Messages helper when macOS leaves the newly versioned
+  helper path silent until timeout, while preserving the fixed read-only scope and per-attempt cleanup.
+
 ## 0.3.0-keeling.3 - 2026-07-21
 
 - Preserve read-only Messages access across versioned installs by reusing only byte-identical
