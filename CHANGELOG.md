@@ -17,6 +17,15 @@ a promise of ongoing maintenance.
   across the shared types, mobile projection, Swift models, and iOS controls, swipes, and activity.
 - Advance the CLI contract to `0.4` with the clearer, intentionally breaking card disposition names.
 
+## 0.3.0-keeling.2 - 2026-07-21
+
+- Re-sign macOS release executables with stable ad-hoc identifiers after Bun compilation so Full
+  Disk Access can attach to the isolated read-only iMessage helper.
+- Fail macOS packaging closed unless both the main Tend binary and iMessage helper pass strict
+  signature and identifier verification, including the exact staged copies that enter the archive.
+- Add `tend imessage collect`, a bounded packaged launchd runner that keeps Full Disk Access on the
+  sibling helper and guarantees private result-file and job cleanup.
+
 ## 0.3.0-keeling.1 - 2026-07-21
 
 - Add the cross-feed `/now`, `/coverage`, and `/priority-ledger` control-plane surfaces while

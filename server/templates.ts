@@ -181,7 +181,7 @@ export function providerSourceRecipe(input: {
   const credentialBoundary = input.profile.provider === "granola"
     ? "Use the official Granola connector when available. If an API key is required, it must remain in the connector runtime or macOS Keychain; never place it in Tend state, recipes, logs, backups, cards, or CLI arguments."
     : input.profile.provider === "imessage"
-      ? "Collect only through the packaged tend-imessage-helper. It reads the fixed Messages database with a bounded lookback, has no outbound command, and is the only process that may receive Full Disk Access."
+      ? "Collect only through `tend imessage collect`, which submits the sibling packaged tend-imessage-helper as a private, bounded launchd job and guarantees cleanup. The helper reads the fixed Messages database, has no outbound command, and is the only process that may receive Full Disk Access."
       : "Connector credentials remain in the connector runtime; never copy tokens, cookies, or secrets into Tend.";
   return {
     recipe: {

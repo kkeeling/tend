@@ -3,6 +3,7 @@ import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { CLI_CONTRACT_VERSION } from "../server/version";
+import { verifyReleaseBinarySignatures } from "./binary-signing";
 
 const root = process.cwd();
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")) as { name: string; version: string };
@@ -27,11 +28,23 @@ if (!existsSync(imessageHelperPath)) {
 if (!existsSync(path.join(clientDir, "index.html"))) {
   throw new Error(`Built UI assets not found: ${clientDir}. Run pnpm build first.`);
 }
+if (platform !== process.platform || arch !== process.arch) {
+  throw new Error(`Package labels must match the build host (${process.platform}-${process.arch}); received ${platform}-${arch}.`);
+}
+
+await verifyReleaseBinarySignatures({
+  tend: binaryPath,
+  imessageHelper: imessageHelperPath,
+}, process.platform);
 
 await rm(stageRoot, { recursive: true, force: true });
 await mkdir(stageDir, { recursive: true });
 await cp(binaryPath, path.join(stageDir, "tend"));
 await cp(imessageHelperPath, path.join(stageDir, "tend-imessage-helper"));
+await verifyReleaseBinarySignatures({
+  tend: path.join(stageDir, "tend"),
+  imessageHelper: path.join(stageDir, "tend-imessage-helper"),
+}, process.platform);
 await cp(clientDir, path.join(stageDir, "dist"), { recursive: true });
 await cp(path.join(root, "README.md"), path.join(stageDir, "README.md"));
 await cp(path.join(root, "CONTRIBUTING.md"), path.join(stageDir, "CONTRIBUTING.md"));

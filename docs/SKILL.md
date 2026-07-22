@@ -74,6 +74,21 @@ waking this same thread and saying `go deal with the feed`.
 9. Repeat until `work:claim` returns idle.
 10. If a meaningful sweep or refresh happened, ask whether to compound learnings.
 
+## macOS Messages Helper
+
+Only the packaged `tend-imessage-helper` may open the fixed Messages database. Never grant Full Disk
+Access to Codex, the main Tend binary, a shell, or a wrapper. Collect through the packaged Tend command:
+
+```sh
+tend imessage collect --since <ISO-8601> [--after-apple-date <decimal> --after-row-id <integer>] [--limit <1-500>]
+```
+
+This command derives the sibling helper path, submits that exact helper as a uniquely labeled `launchd`
+job with the helper path also supplied as `argv[0]`, accepts only the fixed bounded collection options,
+captures one JSON result in an owner-only temporary directory, and removes both the job and temporary
+files on success, failure, or timeout. Do not reproduce this lifecycle with agent-authored shell
+commands. No other process may open `chat.db`, and no Messages mutation is exposed.
+
 ## Completing Work
 
 ```sh

@@ -11,6 +11,7 @@ export function helpCommand(): void {
       "tend logs",
       "tend status",
       "tend doctor",
+      "tend imessage collect --since <ISO-8601> [--after-apple-date <decimal> --after-row-id <integer>] [--limit <1-500>]",
       "tend setup codex [--feed <id> | --chronicle]",
       "tend backup export [path]",
       "tend backup import <path>",

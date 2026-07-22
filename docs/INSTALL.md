@@ -118,6 +118,17 @@ caps lookback at 90 days and output at 500 messages,
 and has no send/delete command. A denial is recorded as `permission_denied`; it is never treated as
 successful coverage.
 
+macOS can attribute a child process's protected-file access to its parent. The packaged
+`tend imessage collect` command therefore uses a private temporary `launchd` job whose executable is
+the authorized helper itself, then removes that job and its owner-only result files after the first
+JSON result, failure, or timeout. This keeps Full Disk Access attached to the helper instead of
+expanding access to Codex, a shell, or the main Tend process. Use it instead of invoking the helper
+as a Codex child:
+
+```sh
+./tend imessage collect --since 2026-07-20T00:00:00Z --limit 200
+```
+
 ## Codex Setup
 
 Create or choose a feed in Tend, then start one fresh Codex Desktop thread for that feed. Do not
