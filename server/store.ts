@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import type {
   AgentPresence,
@@ -52,7 +52,7 @@ import {
   setupCard,
   threadBinding,
 } from "./templates";
-import { isoNow, makeId, readJson, withMutationLock, writeJson, writeText } from "./util";
+import { appendPrivateText, ensurePrivateDirectory, isoNow, makeId, readJson, withMutationLock, writeJson, writeText } from "./util";
 import { defaultDictationCapability } from "./monologue";
 import { FileCardRepository, type CardRepository } from "./repositories/cards";
 import { FileFeedEventRepository, type FeedEventRepository } from "./repositories/feedEvents";
@@ -159,8 +159,8 @@ export class AttentionStore {
   }
 
   async init(): Promise<void> {
-    await mkdir(this.dataDir, { recursive: true });
-    await mkdir(this.agentPath("claude"), { recursive: true });
+    await ensurePrivateDirectory(this.dataDir);
+    await ensurePrivateDirectory(this.agentPath("claude"));
     const dictationPath = this.path("integrations/dictation.json");
     if (!existsSync(dictationPath)) await writeJson(dictationPath, defaultDictationCapability());
     await this.workspaceFeeds.init(DEFAULT_FEED_IDS);
@@ -563,15 +563,15 @@ export class AttentionStore {
 
   async writeAgentPresence(agent: AgentPresence["agent"], presence: AgentPresence): Promise<void> {
     if (presence.agent !== agent) throw new Error(`Presence agent mismatch: ${presence.agent}`);
-    await mkdir(this.agentPath(agent), { recursive: true });
+    await ensurePrivateDirectory(this.agentPath(agent));
     await writeJson(this.agentPath(agent, "presence.json"), presence);
     // The monitor fails closed until the ledger exists; presence arms that readable path.
-    await appendFile(this.agentPath(agent, "wake.jsonl"), "", "utf8");
+    await appendPrivateText(this.agentPath(agent, "wake.jsonl"), "");
   }
 
   async appendAgentWake(agent: AgentPresence["agent"], line: Omit<AgentWakeLine, "seq">): Promise<AgentWakeLine> {
     return this.withAgentWakeLock(async () => {
-      await mkdir(this.agentPath(agent), { recursive: true });
+      await ensurePrivateDirectory(this.agentPath(agent));
       await this.rotateAgentWakeIfNeeded(agent);
       const nextSeq = (this.agentWakeSeq.get(agent) ?? await this.scanAgentWakeSeq(agent)) + 1;
       this.agentWakeSeq.set(agent, nextSeq);
@@ -579,7 +579,7 @@ export class AttentionStore {
       const serialized = JSON.stringify(full);
       // JSON escaping should already guarantee this; keep the guard because monitors consume physical lines.
       if (serialized.includes("\n") || serialized.includes("\r")) throw new Error("Agent wake lines must serialize to one physical line.");
-      await appendFile(this.agentPath(agent, "wake.jsonl"), `${serialized}\n`, "utf8");
+      await appendPrivateText(this.agentPath(agent, "wake.jsonl"), `${serialized}\n`);
       return full;
     });
   }
@@ -787,7 +787,7 @@ export class AttentionStore {
       if (!feedIds.includes(feedId)) throw new Error(`Feed not found: ${feedId}`);
       await this.appendEvent({ feedId, type: "feed.archived" });
       await this.workspaceFeeds.removeFeedId(feedId);
-      await mkdir(this.path("archived-feeds"), { recursive: true });
+      await ensurePrivateDirectory(this.path("archived-feeds"));
       await rename(this.feedPath(feedId), this.path("archived-feeds", `${feedId}-${Date.now()}`));
     });
   }

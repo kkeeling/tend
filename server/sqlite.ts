@@ -23,6 +23,7 @@ import type { WorkspaceCommitmentRepository } from "./repositories/workspaceComm
 import type { PriorityRuleRepository } from "./repositories/priorityRules";
 import type { PriorityLedgerRepository } from "./repositories/priorityLedger";
 import type { WorkspaceNowProjectionRepository } from "./repositories/workspaceNowProjection";
+import { configurePrivateProcessPermissions, ensurePrivateFile, PRIVATE_DIRECTORY_MODE } from "./util";
 
 export const SQLITE_SCHEMA_VERSION = 17;
 
@@ -42,7 +43,8 @@ export class LocalSqliteStore {
   }
 
   async init(): Promise<void> {
-    await mkdir(path.dirname(this.dbPath), { recursive: true });
+    configurePrivateProcessPermissions();
+    await mkdir(path.dirname(this.dbPath), { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     const db = this.database();
     db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
     const existingSchema = Number((db.query("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined)?.value ?? "0");
@@ -270,6 +272,11 @@ export class LocalSqliteStore {
       );
       CREATE INDEX IF NOT EXISTS idx_work_items_feed_status ON work_items (feed_id, status);
     `);
+    await Promise.all([
+      ensurePrivateFile(this.dbPath),
+      ensurePrivateFile(`${this.dbPath}-wal`),
+      ensurePrivateFile(`${this.dbPath}-shm`),
+    ]);
     this.migrateFeedScopedPrimaryKeys();
     this.migrateFeedEventOrdering();
     this.migrateSourceProfiles();
@@ -297,8 +304,10 @@ export class LocalSqliteStore {
   }
 
   async backupTo(targetPath: string): Promise<void> {
-    await mkdir(path.dirname(targetPath), { recursive: true });
+    configurePrivateProcessPermissions();
+    await mkdir(path.dirname(targetPath), { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     this.database().exec(`VACUUM INTO '${targetPath.replaceAll("'", "''")}';`);
+    await ensurePrivateFile(targetPath);
   }
 
   async transaction<T>(callback: () => Promise<T>): Promise<T> {

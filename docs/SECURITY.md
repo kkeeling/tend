@@ -25,6 +25,13 @@ require JSON, a loopback same-origin request, and a per-process mutation token f
 UI. These checks prevent an unrelated website from silently posting to a running Tend server;
 they are not a substitute for keeping the listener on loopback.
 
+## Private Local State
+
+Tend sets an owner-only process umask, creates private runtime state with `0700` directories and
+`0600` files, and repairs legacy runtime modes during initialization. Backup export/import applies
+the same hardening and refuses symbolic links inside copied private state rather than following a
+path outside the private state boundary.
+
 ## Agent Lanes
 
 - Capability tokens appear exactly once: in the `work:claim` result returned to the recorded

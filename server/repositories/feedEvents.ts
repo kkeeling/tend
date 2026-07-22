@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { FeedEvent } from "../../shared/types";
 import type { MirrorWriteCoordinator } from "./mirrorWrites";
+import { appendPrivateText } from "../util";
 
 export interface FeedEventRepository {
   init(feedIds: string[]): Promise<void>;
@@ -16,8 +17,7 @@ export class FileFeedEventRepository implements FeedEventRepository {
   async init(_feedIds: string[]): Promise<void> {}
 
   async append(event: FeedEvent): Promise<void> {
-    await mkdir(this.feedPath(event.feedId), { recursive: true });
-    await appendFile(this.eventsPath(event.feedId), `${JSON.stringify(event)}\n`, "utf8");
+    await appendPrivateText(this.eventsPath(event.feedId), `${JSON.stringify(event)}\n`);
   }
 
   async list(feedId: string): Promise<FeedEvent[]> {

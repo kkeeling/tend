@@ -1,4 +1,3 @@
-import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { attentionDataDir, attentionDbPath, attentionHome } from "./paths";
 import { FileCardRepository, MirroredCardRepository } from "./repositories/cards";
@@ -23,6 +22,7 @@ import { FilePriorityLedgerRepository, MirroredPriorityLedgerRepository } from "
 import { FileWorkspaceNowProjectionRepository, MirroredWorkspaceNowProjectionRepository } from "./repositories/workspaceNowProjection";
 import { LocalSqliteStore } from "./sqlite";
 import { AttentionStore } from "./store";
+import { configurePrivateProcessPermissions, ensurePrivateDirectory, hardenPrivateTree } from "./util";
 
 export function resolveRuntimeRoot(_appRoot?: string): string {
   return attentionHome();
@@ -44,7 +44,15 @@ export async function createLocalRuntime(
   dataDir = resolveDataDir(),
   dbPath = path.join(path.dirname(dataDir), "attention.db"),
 ): Promise<{ dataDir: string; sqlite: LocalSqliteStore; store: AttentionStore }> {
-  await mkdir(dataDir, { recursive: true });
+  configurePrivateProcessPermissions();
+  const runtimeRoot = path.dirname(dataDir);
+  const ownsRuntimeRoot = path.resolve(runtimeRoot) === path.resolve(attentionHome());
+  if (ownsRuntimeRoot) {
+    await ensurePrivateDirectory(runtimeRoot);
+    await hardenPrivateTree(runtimeRoot);
+  }
+  await ensurePrivateDirectory(dataDir);
+  await hardenPrivateTree(ownsRuntimeRoot ? runtimeRoot : dataDir);
   const sqlite = new LocalSqliteStore(dbPath);
   await sqlite.init();
   const mirrorWrites = new MirrorWriteCoordinator();
@@ -146,5 +154,6 @@ export async function createLocalRuntime(
     workspaceNowProjection,
   });
   await store.init();
+  await hardenPrivateTree(ownsRuntimeRoot ? runtimeRoot : dataDir);
   return { dataDir, sqlite, store };
 }

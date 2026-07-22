@@ -17,6 +17,11 @@ a promise of ongoing maintenance.
   across the shared types, mobile projection, Swift models, and iOS controls, swipes, and activity.
 - Advance the CLI contract to `0.4` with the clearer, intentionally breaking card disposition names.
 
+## 0.3.0-keeling.5 - 2026-07-21
+
+- Keep private runtime state and exported backups owner-only (`0700` directories, `0600` files),
+  repair legacy modes during initialization, and refuse symlinks inside copied private state.
+
 ## 0.3.0-keeling.4 - 2026-07-21
 
 - Retry a prior installed, byte-identical Messages helper when macOS leaves the newly versioned

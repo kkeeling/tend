@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { CommitmentEvent } from "../../shared/types";
 import type { MirrorWriteCoordinator } from "./mirrorWrites";
+import { appendPrivateText } from "../util";
 
 export interface CommitmentEventRepository {
   init(): Promise<void>;
@@ -20,8 +21,7 @@ export class FileCommitmentEventRepository implements CommitmentEventRepository 
   }
   async append(event: CommitmentEvent): Promise<void> {
     if ((await this.list()).some((item) => item.id === event.id)) return;
-    await mkdir(path.dirname(this.file()), { recursive: true });
-    await appendFile(this.file(), `${JSON.stringify(event)}\n`, "utf8");
+    await appendPrivateText(this.file(), `${JSON.stringify(event)}\n`);
   }
   private file(): string { return path.join(this.dataDir, "workspace", "commitment-events.jsonl"); }
 }

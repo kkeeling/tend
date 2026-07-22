@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { SourceAttempt } from "../../shared/types";
 import type { MirrorWriteCoordinator } from "./mirrorWrites";
+import { appendPrivateText } from "../util";
 
 export interface SourceAttemptRepository {
   init(feedIds: string[]): Promise<void>;
@@ -34,8 +35,7 @@ export class FileSourceAttemptRepository implements SourceAttemptRepository {
       const ids = await this.ids(attempt.feedId);
       if (ids.has(attempt.id)) return;
       const file = this.file(attempt.feedId);
-      await mkdir(path.dirname(file), { recursive: true });
-      await appendFile(file, `${JSON.stringify(attempt)}\n`, "utf8");
+      await appendPrivateText(file, `${JSON.stringify(attempt)}\n`);
       ids.add(attempt.id);
     });
     this.appendTails.set(attempt.feedId, operation.catch(() => undefined));

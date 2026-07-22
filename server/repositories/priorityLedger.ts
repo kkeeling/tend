@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { PriorityLedgerEntry } from "../../shared/types";
 import type { MirrorWriteCoordinator } from "./mirrorWrites";
+import { appendPrivateText } from "../util";
 
 export interface PriorityLedgerRepository { init(): Promise<void>; list(): Promise<PriorityLedgerEntry[]>; append(entry: PriorityLedgerEntry): Promise<void>; }
 export class FilePriorityLedgerRepository implements PriorityLedgerRepository {
@@ -14,7 +15,7 @@ export class FilePriorityLedgerRepository implements PriorityLedgerRepository {
   }
   async append(entry: PriorityLedgerEntry): Promise<void> {
     if ((await this.list()).some((item) => item.id === entry.id)) return;
-    await mkdir(path.dirname(this.file()), { recursive: true }); await appendFile(this.file(), `${JSON.stringify(entry)}\n`, "utf8");
+    await appendPrivateText(this.file(), `${JSON.stringify(entry)}\n`);
   }
   private file(): string { return path.join(this.dataDir, "workspace", "priority", "ledger.jsonl"); }
 }

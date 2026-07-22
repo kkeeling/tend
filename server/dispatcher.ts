@@ -1,10 +1,10 @@
-import { appendFile, mkdir, rename, stat } from "node:fs/promises";
+import { rename, stat } from "node:fs/promises";
 import path from "node:path";
 import { effectiveWorkLane } from "../shared/lanes";
 import type { DrainState, ThreadBinding, WorkItem } from "../shared/types";
 import { runAppServerDrain } from "./codexAppServer";
 import type { AttentionStore } from "./store";
-import { isoNow } from "./util";
+import { appendPrivateText, ensurePrivateDirectory, isoNow } from "./util";
 
 declare const Bun: {
   which(binary: string): string | null;
@@ -191,19 +191,19 @@ export class DrainDispatcher {
 
   private async spawnCodexDrain(feedId: string, threadId: string, prompt: string): Promise<number> {
     const logFile = await this.prepareLog(feedId);
-    await appendFile(logFile, `\n===== drain ${isoNow()} thread=${threadId} =====\n`, "utf8");
+    await appendPrivateText(logFile, `\n===== drain ${isoNow()} thread=${threadId} =====\n`);
     return runAppServerDrain({
       threadId,
       prompt,
       cwd: this.options.appRoot,
       writableRoots: [this.options.runtimeRoot],
-      log: (line) => appendFile(logFile, `${line}\n`, "utf8"),
+      log: (line) => appendPrivateText(logFile, `${line}\n`),
     });
   }
 
   private async prepareLog(feedId: string): Promise<string> {
     const directory = path.join(this.options.runtimeRoot, "drains");
-    await mkdir(directory, { recursive: true });
+    await ensurePrivateDirectory(directory);
     const file = path.join(directory, `${feedId}.log`);
     try {
       if ((await stat(file)).size > MAX_DRAIN_LOG_BYTES) await rename(file, `${file}.1`);

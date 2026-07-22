@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 import { formatCliError } from "./server/cli/errors";
 import { runTendCli } from "./server/cli";
+import { configurePrivateProcessPermissions } from "./server/util";
 
+configurePrivateProcessPermissions();
 const args = process.argv.slice(2);
 try {
   await runTendCli(args);
