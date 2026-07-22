@@ -28,9 +28,11 @@ async function setup(notify: (data: unknown) => void = () => {}) {
 }
 
 function jsonPost(body: unknown, headers: Record<string, string> = {}): RequestInit {
+  const requestHeaders = new Headers({ "content-type": "application/json" });
+  for (const [name, value] of Object.entries(headers)) requestHeaders.set(name, value);
   return {
     method: "POST",
-    headers: { "content-type": "application/json", ...headers },
+    headers: requestHeaders,
     body: JSON.stringify(body),
   };
 }
@@ -43,10 +45,13 @@ describe("API routing and mutation hardening", () => {
   test("rejects foreign Origin mutations and allows no-Origin CLI-style mutations", async () => {
     const { app } = await setup();
 
-    const blocked = await app.request("/api/agents/claude/presence", jsonPost(
+    const foreignRequest = jsonPost(
       { sessionId: "session-foreign" },
       { origin: "https://attacker.example" },
-    ));
+    );
+    expect(new Request("http://localhost/api/agents/claude/presence", foreignRequest).headers.get("origin"))
+      .toBe("https://attacker.example");
+    const blocked = await app.request("/api/agents/claude/presence", foreignRequest);
     expect(blocked.status).toBe(403);
     expect(await blocked.json()).toEqual({ error: "Cross-origin mutation requests are not allowed." });
 
