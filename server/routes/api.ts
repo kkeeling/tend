@@ -2,10 +2,10 @@ import { Hono } from "hono";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseOptionalWorkAgent } from "../../shared/lanes";
-import type { PostActionCompletion, VoiceTarget } from "../../shared/types";
+import type { PostActionCompletion, PriorityRuleDefinition, VoiceTarget } from "../../shared/types";
 import { mindContextPublicationReceipt } from "../domain";
 import { versionInfo } from "../version";
-import { body, mutation, mutationAccessError, type LocalRouteContext } from "./shared";
+import { aggregatedReadAccessError, body, mutation, mutationAccessError, type LocalRouteContext } from "./shared";
 
 export function apiRoutes(context: LocalRouteContext): Hono {
   const { artifactsDir, dataDir, domain, mobileStatus, mutationToken, notify, sqlite, store } = context;
@@ -14,6 +14,8 @@ export function apiRoutes(context: LocalRouteContext): Hono {
   app.use("/api/*", async (c, next) => {
     const error = mutationAccessError(c, mutationToken);
     if (error) return error;
+    const readError = aggregatedReadAccessError(c, mutationToken);
+    if (readError) return readError;
     await next();
   });
 
@@ -23,6 +25,10 @@ export function apiRoutes(context: LocalRouteContext): Hono {
   });
   app.get("/api/status", (c) => c.json({ ok: true, version: versionInfo(), dataDir, sqlite: sqlite.status() }));
   app.get("/api/state", async (c) => c.json(await store.readWorkspace(c.req.query("feed") ?? "inbox")));
+  app.get("/api/workspace", async (c) => { await domain.refreshWorkspacePriorities(); return c.json(await store.readWorkspaceControlPlane()); });
+  app.get("/api/workspace/now", async (c) => { await domain.refreshWorkspacePriorities(); return c.json((await store.readWorkspaceControlPlane()).now); });
+  app.get("/api/workspace/coverage", async (c) => { await domain.refreshWorkspacePriorities(); return c.json((await store.readWorkspaceControlPlane()).coverage); });
+  app.get("/api/workspace/priority", async (c) => { await domain.refreshWorkspacePriorities(); return c.json((await store.readWorkspaceControlPlane()).priority); });
   app.get("/api/health", (c) => c.json({ ok: true }));
   app.get("/api/mobile/status", (c) => c.json(mobileStatus?.() ?? { enabled: false }));
   app.get("/api/mind-context/current", async (c) => {
@@ -105,6 +111,83 @@ export function apiRoutes(context: LocalRouteContext): Hono {
       assignee: parseOptionalWorkAgent(input.assignee),
     });
   }));
+  app.post("/api/workspace/instructions", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    const cardRef = input.cardRef && typeof input.cardRef === "object" ? input.cardRef as { feedId?: unknown; cardId?: unknown } : {};
+    return domain.queueWorkspaceInstruction({
+      cardRef: { feedId: String(cardRef.feedId ?? ""), cardId: String(cardRef.cardId ?? "") },
+      instruction: String(input.instruction ?? ""),
+      ...(typeof input.commitmentId === "string" ? { commitmentId: input.commitmentId } : {}),
+      ...(typeof input.expectedCommitmentVersion === "number" ? { expectedCommitmentVersion: input.expectedCommitmentVersion } : {}),
+      ...(parseOptionalWorkAgent(input.assignee) ? { assignee: parseOptionalWorkAgent(input.assignee) } : {}),
+    });
+  }));
+  app.post("/api/workspace/commitment-candidates/:candidate/confirm", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    if (typeof input.accept !== "boolean") throw new Error("Commitment confirmation requires an explicit boolean accept value.");
+    return domain.confirmCommitmentCandidate(c.req.param("candidate"), input.accept);
+  }));
+  app.post("/api/workspace/commitment-candidates/:candidate/split", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.splitCommitmentCandidate(c.req.param("candidate"), {
+      deduplicationKey: String(input.deduplicationKey ?? ""),
+      reason: String(input.reason ?? ""),
+      ...(typeof input.ownerFeedId === "string" ? { ownerFeedId: input.ownerFeedId } : {}),
+    });
+  }));
+  app.post("/api/workspace/commitment-candidates/:candidate/relink", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.relinkCommitmentCandidate(
+      c.req.param("candidate"),
+      String(input.targetCommitmentId ?? ""),
+      String(input.reason ?? ""),
+    );
+  }));
+  app.post("/api/workspace/commitments/:commitment/rehome", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.rehomeCommitment(c.req.param("commitment"), {
+      targetFeedId: String(input.targetFeedId ?? ""),
+      expectedVersion: Number(input.expectedVersion),
+      reason: String(input.reason ?? ""),
+      ...(typeof input.targetCardId === "string" ? { targetCardId: input.targetCardId } : {}),
+    });
+  }));
+  app.post("/api/workspace/commitments/:commitment/completion-evidence", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.recordCommitmentCompletionEvidence(c.req.param("commitment"), {
+      sourceFeedId: String(input.sourceFeedId ?? ""),
+      sourceId: String(input.sourceId ?? ""),
+      sourceRunId: String(input.sourceRunId ?? ""),
+      snapshotId: String(input.snapshotId ?? ""),
+      evidenceKind: String(input.evidenceKind ?? "") as "clear_completion" | "ambiguous_completion" | "contradiction",
+      summary: String(input.summary ?? ""),
+    });
+  }));
+  app.post("/api/workspace/commitment-candidates/:candidate/signal-change", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.recordCommitmentSignalChange(c.req.param("candidate"), {
+      kind: String(input.kind ?? "") as "edited" | "deleted" | "retracted" | "conflict",
+      reason: String(input.reason ?? ""),
+      ...(typeof input.evidenceRunId === "string" ? { evidenceRunId: input.evidenceRunId } : {}),
+      ...(typeof input.evidenceSnapshotId === "string" ? { evidenceSnapshotId: input.evidenceSnapshotId } : {}),
+    });
+  }));
+  app.post("/api/workspace/priority/corrections", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.recordPriorityCorrection({
+      preferredCommitmentId: String(input.preferredCommitmentId ?? ""),
+      overCommitmentId: String(input.overCommitmentId ?? ""),
+      reason: String(input.reason ?? ""),
+      proposedRules: input.proposedRules as PriorityRuleDefinition,
+    });
+  }));
+  app.post("/api/workspace/priority/evaluate", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.refreshWorkspacePriorities(
+      typeof input.judgmentPolicyVersion === "string" ? input.judgmentPolicyVersion : undefined,
+    );
+  }));
+  app.post("/api/workspace/priority/proposals/:proposal/approve", async (c) => mutation(c, notify, async () => domain.approvePriorityRuleProposal(c.req.param("proposal"))));
   app.post("/api/revision-proposals/:proposal/apply", async (c) => mutation(c, notify, async () => domain.applyRevisionProposal(c.req.param("proposal"))));
   app.post("/api/revision-proposals/:proposal/reject", async (c) => mutation(c, notify, async () => domain.rejectRevisionProposal(c.req.param("proposal"))));
   app.post("/api/revision-proposals/:proposal", async (c) => mutation(c, notify, async () => domain.updateRevisionProposal(c.req.param("proposal"), String((await body(c)).content ?? ""))));

@@ -1,6 +1,6 @@
 {
   "name": "tend",
-  "version": "0.2.0",
+  "version": "0.3.0-keeling.7",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -16,7 +16,7 @@
     "test": "bun test",
     "seed:demo": "bun tend.ts cli demo:seed",
     "tend": "bun tend.ts",
-    "tend:build": "bun scripts/clean-legacy-cli-artifacts.ts && bun build ./tend.ts --compile --outfile dist-bin/tend",
+    "tend:build": "bun scripts/clean-legacy-cli-artifacts.ts && bun scripts/build-binaries.ts",
     "tend:smoke": "bun scripts/smoke-binary.ts",
     "tend:package": "bun scripts/clean-legacy-cli-artifacts.ts && bun scripts/package-binary.ts"
   },

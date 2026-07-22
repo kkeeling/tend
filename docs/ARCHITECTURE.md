@@ -23,7 +23,38 @@ flowchart LR
   Thread --> Connectors["Codex Desktop connectors"]
 ```
 
-The current domain model keeps the richest authoring artifacts readable in local file mirrors while moving active runtime records into SQLite. Active feed membership, editable prompt/policy documents, feed cards, routine action groups, source recipes/checkpoints, source run records, sweep state/artifacts, revision records, feed audit events, and work items are now behind repository interfaces with SQLite as the runtime authority and readable files as backup-compatible mirrors.
+The current domain model keeps the richest authoring artifacts readable in local file mirrors while moving active runtime records into SQLite. Active feed membership, editable prompt/policy documents, feed cards, routine action groups, source recipes/checkpoints, source profiles and attempts, source run records, canonical commitments and signal links, priority rules and ledger entries, sweep state/artifacts, revision records, feed audit events, and work items are behind repository interfaces with SQLite as the runtime authority and readable files as backup-compatible mirrors.
+
+## Life Control Plane
+
+`/now` is a workspace projection over normal feed-owned cards. It never creates a global execution
+lane: each item carries its canonical `{feedId, cardId}` owner, and chat or CTA work is delegated to
+that feed's existing queue. A linked commitment enriches the card with lifecycle, cross-source
+signal references, and deterministic priority details; urgent reply, decision, and deadline cards
+remain eligible without commitment metadata.
+
+Source attempts are append-only facts. Coverage derives freshness only when a required source has
+the expected connector identity and a complete bounded collection receipt. Authorization,
+permission, truncation, rate limits, identity mismatch, or staleness are visible states and block
+workspace all-clear. Priority uses immutable approved rulesets plus versioned judgment inputs;
+evaluations and corrections are mirrored to an append-only ledger.
+
+Commitments have one feed-owned card even when evidence arrives through several feeds. A matching
+signal in a non-owner feed creates an owner-feed reconciliation item with the commitment's expected
+version; only confirmation links it. Explicit re-home is also versioned and refuses active or
+approved-blocked owner work. Typed completion evidence drives `completion_pending`, `fulfilled`, or
+`reopened`, while source edits, deletion, retraction, and conflict append history and resurface the
+owner card. Prior signal evidence is retained for audit and correction.
+
+SQLite is authoritative for life-control-plane records. File mirrors publish only after the
+enclosing transaction commits, and a failed mirror write rolls the transaction back. On restart,
+these newer records are not imported back from an orphan mirror, preventing a rolled-back write
+from becoming authoritative later.
+
+External action authority remains feed-local and digest-bound. Tend verifies a provider-neutral
+execution identity, nonce/grant, assurance level, current card owner, editable artifact, and current
+source evidence before mutation. Connector credentials and raw foreign evidence remain outside the
+workspace read model.
 
 On Your Mind is a workspace-level contextual layer beside feeds. One bound Chronicle thread
 publishes ordered, privacy-filtered updates. Feed runners receive a prompt-safe summary before
@@ -57,7 +88,7 @@ top level, and agent operations live under `tend cli`. There is no separate runn
 - `src/state/realtime.tsx` hides SSE details behind a provider.
 - `src/App.tsx` is the route-level orchestrator for query state, keyboard shortcuts, and mutations.
 - `src/feed/` owns feed selectors, card rendering, and routine action rendering.
-- `src/workspace/` owns prompt/source editing and learning review surfaces.
+- `src/workspace/` owns prompt/source editing, learning review, and the shared Now, Coverage, and Priority Ledger views.
 - `src/shell/` owns top navigation, the inspector modal, and the voice/work dock.
 
 ## Agent Model

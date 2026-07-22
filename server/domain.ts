@@ -6,6 +6,13 @@ import type {
   CardAction,
   CardBlock,
   CardContextInfluence,
+  CommitmentCandidate,
+  CommitmentCandidateInput,
+  CommitmentLifecycle,
+  ConnectorExecutionGrant,
+  ConnectorExecutionRequirement,
+  ConnectorVerificationObservation,
+  ConnectorVerificationReceipt,
   FeedConfig,
   FeedMindContext,
   FeedView,
@@ -20,10 +27,18 @@ import type {
   MindContextUpdate,
   MindContextWorkspace,
   PolicyRevision,
+  PriorityRuleDefinition,
+  PriorityRuleProposal,
+  PriorityRuleSet,
   PostActionCompletion,
   ProposedAction,
   RevisionProposal,
   RoutineActionGroup,
+  SourceAttempt,
+  SourceAttemptOutcome,
+  SourceCollectionProof,
+  SourceIdentity,
+  SourceProfile,
   SourceRecipe,
   SourceRunContextUse,
   SweepFeedbackTrace,
@@ -36,21 +51,56 @@ import type {
   WorkItem,
   WorkItemView,
   WorkspaceRevision,
+  WorkspaceCommitment,
+  WorkspaceNowRow,
 } from "../shared/types";
 import type { MobileActionProjection, MobileCommand, MobileCommandResult, MobileCommandReceipt } from "../shared/mobile";
 import { isReservedCardActionId, safeConfiguredCardActions } from "../shared/cardActions";
 import { containsFullEmail } from "../shared/emailThread";
 import { agentLabel, effectiveWorkLane } from "../shared/lanes";
 import { agentPresenceLiveness, AttentionStore, FEED_PROMPT_NAMES, workItemView } from "./store";
-import { demoCards, feedConfig } from "./templates";
+import { demoCards, feedConfig, providerSourceRecipe } from "./templates";
 import { detectMonologue } from "./monologue";
 import { digest, isoNow, makeId, makeToken, safeIdentifier, slugify } from "./util";
 import { actionDigest, cleanupDigest, configuredApprovalAction, requiredSourceMailbox, routineActionDigest, verifySourceMailbox } from "./workflow/approvals";
 import { queuedWork } from "./workflow/workItems";
 import { mobileActionConfirmation, projectMobileCard, projectMobileRoutineAction } from "./mobile/projection";
+import { assertCommitmentTransition } from "./workflow/commitments";
+import { commitmentQualityGate, validatedCommitmentSourceClass } from "./workflow/commitmentQuality";
+import { DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION, PRIORITY_RECIPE_DIGEST, evaluatePriorityRows } from "./workflow/priority";
+import {
+  assertConnectorVerificationFresh,
+  executionRequirementDigest,
+  issueExecutionGrant,
+  normalizeIdentity,
+  requirementFromPolicy,
+  sourceIdentityMatches,
+  verifyConnectorObservation,
+} from "./workflow/connectors";
 
 function appendHistory(card: Card, type: string, detail?: string): void {
   card.history.push({ at: isoNow(), type, detail });
+}
+
+function normalizeSourceAttemptError(error: SourceAttempt["error"] | undefined): SourceAttempt["error"] | undefined {
+  if (!error) return undefined;
+  const errorClass = safeIdentifier(requiredMindText(error.class, "Source error class", 80), "Source error class");
+  const message = requiredMindText(error.message, "Source error message", 1_000)
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted-email]")
+    .replace(/https?:\/\/\S+/gi, "[redacted-url]")
+    .replace(/\b(?:bearer|token|secret|password|api[_ -]?key)\s*[:=]?\s*\S+/gi, "[redacted-secret]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 300);
+  return { class: errorClass, message };
+}
+
+function commitmentCandidateMatches(commitment: WorkspaceCommitment, candidate: CommitmentCandidate): boolean {
+  const normalized = (value: string | undefined) => value?.trim().replace(/\s+/g, " ").toLowerCase() ?? null;
+  return normalized(commitment.promise) === normalized(candidate.normalized.promise)
+    && normalized(commitment.deliverable) === normalized(candidate.normalized.deliverable)
+    && normalized(commitment.counterparty) === normalized(candidate.normalized.owner)
+    && (commitment.dueAt ?? null) === (candidate.normalized.dueAt ?? null);
 }
 
 type WorkCaller =
@@ -336,6 +386,9 @@ function validateCardActions(actions: CardAction[] | undefined): void {
     if (!action.id?.trim()) throw new Error("Card action ids must be non-empty strings.");
     if (isReservedCardActionId(action.id)) throw new Error(`Card action id "${action.id}" is reserved by Tend.`);
     if (ids.has(action.id)) throw new Error(`Card action id "${action.id}" must be unique within a card.`);
+    if (action.execution && (action.behavior !== "approve_action" || action.externalMutation !== true)) {
+      throw new Error("A connector execution policy is valid only on an exact externally mutating approval action.");
+    }
     ids.add(action.id);
   }
 }
@@ -713,6 +766,8 @@ export class AttentionDomain {
     work.verifiedAt = undefined;
     work.verifiedApprovalDigest = undefined;
     work.verifiedMailbox = undefined;
+    work.connectorVerification = undefined;
+    if (work.executionGrant) work.executionGrant = issueExecutionGrant(work.executionGrant);
   }
 
   async registerAgentPresence(
@@ -1022,6 +1077,104 @@ export class AttentionDomain {
     await this.assertSourceRunIdsCurrent(card.feedId, card.sourceRunIds, card.id);
   }
 
+  private async sourceProfileForCard(
+    card: Card,
+    requestedSourceId?: string,
+  ): Promise<{ sourceId: string; profile: SourceProfile } | undefined> {
+    const feed = await this.store.readFeed(card.feedId);
+    if (requestedSourceId) {
+      const source = feed.sources.find((item) => item.id === requestedSourceId);
+      if (!source?.profile) throw new Error(`Execution source profile not found: ${requestedSourceId}`);
+      return { sourceId: source.id, profile: source.profile };
+    }
+    for (const runId of [...(card.sourceRunIds ?? [])].reverse()) {
+      const run = await this.store.readRun(card.feedId, runId);
+      const source = feed.sources.find((item) => item.id === run.sourceId);
+      if (source?.profile) return { sourceId: source.id, profile: source.profile };
+    }
+    const mailbox = card.sourceMailbox?.trim().toLowerCase();
+    if (!mailbox) return undefined;
+    const source = feed.sources.find((item) => item.profile?.expectedIdentity.account?.trim().toLowerCase() === mailbox);
+    return source?.profile ? { sourceId: source.id, profile: source.profile } : undefined;
+  }
+
+  private async executionRequirementForCard(
+    card: Card,
+    action: ProposedAction,
+  ): Promise<ConnectorExecutionRequirement | undefined> {
+    const source = await this.sourceProfileForCard(card, action.execution?.sourceId);
+    if (action.execution) {
+      return requirementFromPolicy(
+        {
+          ...action.execution,
+          ...(action.execution.sourceId ? {} : source ? { sourceId: source.sourceId } : {}),
+        },
+        source?.profile,
+      );
+    }
+    const sourceMailbox = requiredSourceMailbox(card.feedId, card, action);
+    if (!sourceMailbox) return undefined;
+    const provider = source?.profile.provider === "outlook_email" ? "outlook_email" : "gmail";
+    return requirementFromPolicy({
+      provider,
+      operation: "send_reply",
+      ...(source ? { sourceId: source.sourceId } : {}),
+      expectedIdentity: {
+        ...source?.profile.expectedIdentity,
+        account: sourceMailbox,
+      },
+    }, source?.profile);
+  }
+
+  private async executionRequirementForAction(
+    feedId: string,
+    action: ProposedAction,
+  ): Promise<ConnectorExecutionRequirement | undefined> {
+    if (!action.execution) return undefined;
+    const source = action.execution.sourceId
+      ? (await this.store.readFeed(feedId)).sources.find((item) => item.id === action.execution!.sourceId)
+      : undefined;
+    if (action.execution.sourceId && !source?.profile) {
+      throw new Error(`Execution source profile not found: ${action.execution.sourceId}`);
+    }
+    return requirementFromPolicy(action.execution, source?.profile);
+  }
+
+  private async assertActionCanBeOffered(feedId: string, action: ProposedAction): Promise<void> {
+    if (action.execution && action.externalMutation !== true) {
+      throw new Error("A connector execution policy requires externalMutation: true.");
+    }
+    const requirement = await this.executionRequirementForAction(feedId, action);
+    if (requirement?.minimumAssurance === "prepare_only") {
+      throw new Error(`${requirement.provider} is read-only or lacks the configured ${requirement.operation} capability; offer preparation instead of an outbound CTA.`);
+    }
+  }
+
+  private async assertExecutionGrantCurrent(
+    card: Card,
+    action: ProposedAction,
+    grant: ConnectorExecutionGrant | undefined,
+  ): Promise<void> {
+    const current = await this.executionRequirementForCard(card, action);
+    if (!current && !grant) return;
+    if (!current || !grant || executionRequirementDigest(current) !== executionRequirementDigest(grant)) {
+      throw new Error("Approval stale - the connector execution identity or capability changed after approval.");
+    }
+  }
+
+  private assertConnectorVerificationCurrent(work: WorkItem): void {
+    if (!work.executionGrant) return;
+    const receipt = work.connectorVerification;
+    if (
+      !receipt
+      || receipt.nonce !== work.executionGrant.nonce
+      || receipt.grantDigest !== executionRequirementDigest(work.executionGrant)
+    ) {
+      throw new Error("Approved action must pass connector identity verification for the current execution grant immediately before mutation.");
+    }
+    assertConnectorVerificationFresh(receipt);
+  }
+
   private async quarantineLegacyMutationWork(feed: FeedView, work: WorkItem): Promise<boolean> {
     if (
       work.approvalDigest ||
@@ -1059,6 +1212,30 @@ export class AttentionDomain {
     const target = await this.store.validateVoiceTarget(requested);
     await this.store.serialize(() => this.store.appendEvent({ feedId: anchorFeedId, type: "voice.target_changed", detail: { requested, target } }));
     return target;
+  }
+
+  async queueWorkspaceInstruction(input: {
+    cardRef: { feedId: string; cardId: string };
+    instruction: string;
+    commitmentId?: string;
+    expectedCommitmentVersion?: number;
+    assignee?: WorkAgent;
+  }) {
+    if (input.commitmentId) {
+      const commitment = await this.store.readWorkspaceCommitment(input.commitmentId);
+      if (commitment.owner.feedId !== input.cardRef.feedId || commitment.owner.cardId !== input.cardRef.cardId) {
+        throw new Error("The workspace item owner changed; refresh Now before queueing work.");
+      }
+      if (input.expectedCommitmentVersion !== undefined && commitment.version !== input.expectedCommitmentVersion) {
+        throw new Error("The workspace commitment changed; refresh Now before queueing work.");
+      }
+    }
+    return this.submitVoiceInstruction(
+      input.cardRef.feedId,
+      { kind: "card", feedId: input.cardRef.feedId, cardId: input.cardRef.cardId },
+      input.instruction,
+      input.assignee ? { assignee: input.assignee } : {},
+    );
   }
 
   async submitVoiceInstruction(anchorFeedId: string, requested: VoiceTarget, instruction: string, options: { assignee?: WorkAgent } = {}) {
@@ -1381,6 +1558,7 @@ export class AttentionDomain {
     await this.assertCardSourceCurrent(card);
     const action = configuredApprovalAction(card, cardActionId);
     requiredSourceMailbox(feedId, card, action);
+    const executionRequirement = await this.executionRequirementForCard(card, action);
     const approvalDigest = actionDigest(card, cardActionId);
     const feed = await this.store.readFeed(feedId);
     const active = (await this.store.readWorkItems(feedId)).filter((work) =>
@@ -1418,6 +1596,7 @@ export class AttentionDomain {
       kind: "execute_approved_action",
       approvalDigest,
       completionCleanup: feed.config.defaultCleanup,
+      ...(executionRequirement ? { executionGrant: issueExecutionGrant(executionRequirement) } : {}),
       ...(cardActionId ? { cardActionId } : {}),
       ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
     });
@@ -1591,6 +1770,7 @@ export class AttentionDomain {
   async upsertRoutineActionGroup(feedId: string, input: Pick<RoutineActionGroup, "id" | "label" | "summary" | "proposedAction" | "items">): Promise<RoutineActionGroup> {
     if (!input.id.trim() || !input.label.trim() || !input.summary.trim()) throw new Error("Routine action group id, label, and summary are required.");
     if (!input.proposedAction.label.trim() || !input.proposedAction.instruction.trim()) throw new Error("Routine action group approval needs a visible label and exact instruction.");
+    await this.assertActionCanBeOffered(feedId, input.proposedAction);
     if (!input.items.length) throw new Error("Routine action group needs at least one item.");
     const itemIds = input.items.map((item) => item.id);
     const cardIds = input.items.flatMap((item) => item.cardId ? [item.cardId] : []);
@@ -1653,6 +1833,7 @@ export class AttentionDomain {
   ): Promise<WorkItem> {
     const group = await this.store.readRoutineActionGroup(feedId, groupId);
     const approvalDigest = routineActionDigest(group);
+    const executionRequirement = await this.executionRequirementForAction(feedId, group.proposedAction);
     const active = (await this.store.readWorkItems(feedId)).filter((work) =>
       work.kind === "routine_action_batch"
       && work.routineActionGroupId === groupId
@@ -1679,6 +1860,7 @@ export class AttentionDomain {
       kind: "routine_action_batch",
       routineActionGroupId: group.id,
       approvalDigest,
+      ...(executionRequirement ? { executionGrant: issueExecutionGrant(executionRequirement) } : {}),
       ...(sourceMobileCommandId ? { sourceMobileCommandId } : {}),
     });
     group.status = "queued";
@@ -1750,6 +1932,7 @@ export class AttentionDomain {
       const card = await this.store.readCard(feedId, cardId);
       const block = card.blocks.find((item) => item.id === blockId);
       if (!block || block.type !== "editable_text") throw new Error("Editable card block not found.");
+      if ((block.value ?? "") === value) return card;
       block.value = value;
       block.editable = true;
       appendHistory(card, "user.edited_artifact", blockId);
@@ -2176,6 +2359,7 @@ export class AttentionDomain {
         if (work.verifiedApprovalDigest !== work.approvalDigest) {
           throw new Error("Approved action must pass action:verify immediately before the external mutation.");
         }
+        this.assertConnectorVerificationCurrent(work);
         for (const item of group.items) {
           if (!item.cardId) continue;
           const card = await this.store.readCard(feedId, item.cardId);
@@ -2191,6 +2375,7 @@ export class AttentionDomain {
         await this.store.writeRoutineActionGroup(group);
       } else if (work.cardId !== "__feed__") {
         const card = await this.store.readCard(feedId, work.cardId);
+        if (work.approvalDigest) await this.assertCardSourceCurrent(card);
         const currentApprovalDigest = work.approvalDigest
           ? work.kind === "default_cleanup"
             ? cleanupDigest(card, (await this.store.readConfig(feedId)).defaultCleanup)
@@ -2212,6 +2397,9 @@ export class AttentionDomain {
           work.verifiedApprovalDigest !== work.approvalDigest
         ) {
           throw new Error("Approved action must pass action:verify immediately before the external mutation.");
+        }
+        if (work.kind === "execute_approved_action" || work.kind === "default_cleanup") {
+          this.assertConnectorVerificationCurrent(work);
         }
         if (work.kind === "execute_approved_action") {
           const action = configuredApprovalAction(card, work.cardActionId);
@@ -2276,20 +2464,46 @@ export class AttentionDomain {
     });
   }
 
-  async verifyApprovedAction(feedId: string, workId: string, token: string, authenticatedMailbox?: string): Promise<{ approvalDigest: string; action: ProposedAction; artifact?: CardBlock; verifiedMailbox?: string; completionCleanup?: string }> {
+  async verifyApprovedAction(
+    feedId: string,
+    workId: string,
+    token: string,
+    observationOrMailbox?: ConnectorVerificationObservation | string,
+  ): Promise<{
+    approvalDigest: string;
+    action: ProposedAction;
+    artifact?: CardBlock;
+    verifiedMailbox?: string;
+    connectorVerification?: ConnectorVerificationReceipt;
+    completionCleanup?: string;
+  }> {
     return this.store.serialize(async () => {
       const work = await this.store.readWork(feedId, workId);
       if (work.status !== "working") throw new Error("Approved action work must be claimed before verification.");
       if ((work.kind !== "execute_approved_action" && work.kind !== "default_cleanup" && work.kind !== "routine_action_batch") || !work.approvalDigest) throw new Error("Work item is not an approved action.");
       if (work.capabilityToken !== token) throw new Error("Invalid scoped work capability token.");
-      let result: { approvalDigest: string; action: ProposedAction; artifact?: CardBlock; verifiedMailbox?: string; completionCleanup?: string };
+      let result: {
+        approvalDigest: string;
+        action: ProposedAction;
+        artifact?: CardBlock;
+        verifiedMailbox?: string;
+        connectorVerification?: ConnectorVerificationReceipt;
+        completionCleanup?: string;
+      };
       if (work.kind === "routine_action_batch") {
         if (!work.routineActionGroupId) throw new Error("Routine action work is missing its group.");
         const group = await this.store.readRoutineActionGroup(feedId, work.routineActionGroupId);
         if (work.approvalDigest !== routineActionDigest(group)) throw new Error("Approval stale - reread and return the routine action group for review.");
+        const currentRequirement = await this.executionRequirementForAction(feedId, group.proposedAction);
+        if (currentRequirement || work.executionGrant) {
+          if (!currentRequirement || !work.executionGrant || executionRequirementDigest(currentRequirement) !== executionRequirementDigest(work.executionGrant)) {
+            throw new Error("Approval stale - the connector execution identity or capability changed after approval.");
+          }
+        }
         result = { approvalDigest: work.approvalDigest, action: group.proposedAction };
       } else {
         const card = await this.store.readCard(feedId, work.cardId);
+        await this.assertCardSourceCurrent(card);
         if (work.kind === "default_cleanup") {
           const config = await this.store.readConfig(feedId);
           if (work.instruction !== config.defaultCleanup || work.approvalDigest !== cleanupDigest(card, config.defaultCleanup)) throw new Error("Approval stale - reread and return the card for review.");
@@ -2303,7 +2517,13 @@ export class AttentionDomain {
           if (work.completionCleanup && work.completionCleanup !== (await this.store.readConfig(feedId)).defaultCleanup) {
             throw new Error("Approval stale - the configured completion cleanup changed after approval.");
           }
-          const verifiedMailbox = verifySourceMailbox(feedId, card, action, authenticatedMailbox);
+          await this.assertExecutionGrantCurrent(card, action, work.executionGrant);
+          const authenticatedMailbox = typeof observationOrMailbox === "string" ? observationOrMailbox : undefined;
+          const verifiedMailbox = verifySourceMailbox(feedId, card, action, authenticatedMailbox ?? (
+            observationOrMailbox && typeof observationOrMailbox === "object"
+              ? observationOrMailbox.observedIdentity.account
+              : undefined
+          ));
           result = {
             approvalDigest: work.approvalDigest,
             action,
@@ -2313,11 +2533,38 @@ export class AttentionDomain {
           };
         }
       }
+      if (work.executionGrant) {
+        const observation: ConnectorVerificationObservation | undefined = typeof observationOrMailbox === "string"
+          ? {
+              provider: work.executionGrant.provider,
+              operation: work.executionGrant.operation,
+              observedIdentity: { account: observationOrMailbox },
+              assurance: "agent_host_observed",
+              observedAt: isoNow(),
+              nonce: work.executionGrant.nonce,
+            }
+          : observationOrMailbox;
+        if (!observation) {
+          throw new Error(`Connector verification requires a fresh ${work.executionGrant.provider} identity observation for this execution grant.`);
+        }
+        result.connectorVerification = verifyConnectorObservation(work.executionGrant, observation);
+      }
       work.verifiedAt = isoNow();
       work.verifiedApprovalDigest = work.approvalDigest;
       work.verifiedMailbox = result.verifiedMailbox;
+      work.connectorVerification = result.connectorVerification;
       await this.store.writeWork(work);
-      await this.store.appendEvent({ feedId, cardId: work.cardId, workId, type: "action.verified", detail: { verifiedMailbox: work.verifiedMailbox } });
+      await this.store.appendEvent({
+        feedId,
+        cardId: work.cardId,
+        workId,
+        type: "action.verified",
+        detail: {
+          provider: work.connectorVerification?.provider,
+          assurance: work.connectorVerification?.assurance,
+          verifiedMailbox: work.verifiedMailbox,
+        },
+      });
       return result;
     });
   }
@@ -2529,12 +2776,72 @@ export class AttentionDomain {
     await this.store.serialize(() => this.store.writeSourceRecipe(feedId, sourceId, content.trim()));
   }
 
+  async configureSourceProfile(feedId: string, sourceId: string, input: SourceProfile): Promise<SourceRecipe> {
+    const allowedProviders = new Set(["gmail", "outlook_email", "google_calendar", "outlook_calendar", "slack", "teams", "granola", "imessage", "custom"]);
+    const allowedOnboardingStates = new Set(["authorization_required", "connected", "paused", "disconnected"]);
+    if (!input || typeof input !== "object" || !allowedProviders.has(input.provider)) throw new Error("Source provider is unsupported.");
+    if (!allowedOnboardingStates.has(input.onboardingState)) throw new Error("Source onboardingState is unsupported.");
+    if (typeof input.required !== "boolean") throw new Error("Source required must be a boolean.");
+    if (!input.expectedIdentity || typeof input.expectedIdentity !== "object" || Array.isArray(input.expectedIdentity)) {
+      throw new Error("Source expectedIdentity must be an identity object.");
+    }
+    if (!Number.isInteger(input.cadenceMinutes) || input.cadenceMinutes < 1) throw new Error("Source cadenceMinutes must be a positive integer.");
+    if (!Number.isInteger(input.freshnessMinutes) || input.freshnessMinutes < 1) throw new Error("Source freshnessMinutes must be a positive integer.");
+    if (!Number.isInteger(input.lookbackDays) || input.lookbackDays < 1) throw new Error("Source lookbackDays must be a positive integer.");
+    const allowedCapabilities = new Set(["read", "prepare_reply", "send_reply", "write"]);
+    if (!Array.isArray(input.actionCapabilities) || input.actionCapabilities.some((capability) => !allowedCapabilities.has(capability))) {
+      throw new Error("Source actionCapabilities contains an unsupported capability.");
+    }
+    if (new Set(input.actionCapabilities).size !== input.actionCapabilities.length) throw new Error("Source actionCapabilities must be unique.");
+    if ((input.provider === "granola" || input.provider === "imessage") && input.actionCapabilities.some((capability) => capability === "send_reply" || capability === "write")) {
+      throw new Error(`${input.provider} is read-only and cannot be configured with outbound mutation capabilities.`);
+    }
+    const expectedIdentity = normalizeIdentity(input.expectedIdentity);
+    if (input.onboardingState === "connected" && !Object.keys(expectedIdentity).length) {
+      throw new Error("A connected source profile requires an exact expected identity.");
+    }
+    const profile: SourceProfile = {
+      ...input,
+      expectedIdentity,
+      actionCapabilities: [...input.actionCapabilities],
+      ...(input.scopeSummary?.trim() ? { scopeSummary: input.scopeSummary.trim() } : {}),
+    };
+    return this.store.serialize(async () => {
+      const recipe = await this.store.writeSourceProfile(feedId, sourceId, profile);
+      const guidance = providerSourceRecipe({ id: recipe.id, name: recipe.name, summary: recipe.summary, profile });
+      await this.store.writeSourceRecipe(feedId, sourceId, guidance.markdown);
+      return recipe;
+    });
+  }
+
   async upsertCard(feedId: string, input: Partial<Card> & Pick<Card, "id" | "title" | "why" | "blocks">): Promise<Card> {
     safeIdentifier(feedId, "Feed id");
     safeIdentifier(input.id, "Card id");
     validateCardBlocks(input.blocks);
     validateCardActions(input.actions);
+    if (input.proposedAction) await this.assertActionCanBeOffered(feedId, input.proposedAction);
+    for (const action of input.actions ?? []) {
+      if (action.behavior !== "approve_action" || !action.instruction) continue;
+      await this.assertActionCanBeOffered(feedId, {
+        label: action.label,
+        instruction: action.instruction,
+        ...(action.artifactBlockId ? { artifactBlockId: action.artifactBlockId } : {}),
+        ...(action.externalMutation !== undefined ? { externalMutation: action.externalMutation } : {}),
+        ...(action.mailboxPolicy ? { mailboxPolicy: action.mailboxPolicy } : {}),
+        ...(action.execution ? { execution: action.execution } : {}),
+      });
+    }
     const sourceRunIds = validateSourceRunIds(input.sourceRunIds);
+    if (input.attentionPriority) {
+      requiredMindText(input.attentionPriority.domain, "Card priority domain", 100);
+      if (!["low", "medium", "high", "severe"].includes(input.attentionPriority.consequence)) throw new Error("Card priority consequence is unsupported.");
+      if (!Number.isFinite(input.attentionPriority.certainty) || input.attentionPriority.certainty < 0 || input.attentionPriority.certainty > 1) throw new Error("Card priority certainty must be between 0 and 1.");
+      if (input.attentionPriority.dueAt && !Number.isFinite(Date.parse(input.attentionPriority.dueAt))) throw new Error("Card priority dueAt must be an ISO date-time.");
+      requiredMindText(input.attentionPriority.judgmentPolicyVersion, "Card priority judgment policy", 80);
+      requiredMindText(input.attentionPriority.judgmentModel, "Card priority judgment model", 120);
+      requiredMindText(input.attentionPriority.judgmentRuntime, "Card priority judgment runtime", 120);
+      if (input.attentionPriority.judgmentRecipeDigest !== PRIORITY_RECIPE_DIGEST) throw new Error("Card priority judgment recipe is not validated by this Tend build.");
+    }
     return this.store.serialize(async () => {
       const config = await this.store.readConfig(feedId);
       const now = isoNow();
@@ -2553,6 +2860,8 @@ export class AttentionDomain {
         sourceMailbox: input.sourceMailbox ?? existing?.sourceMailbox,
         sourceRunIds: sourceRunIds ?? existing?.sourceRunIds,
         contextInfluence,
+        commitmentId: input.commitmentId ?? existing?.commitmentId,
+        attentionPriority: input.attentionPriority ?? existing?.attentionPriority,
         blocks: input.blocks,
         proposedAction: input.proposedAction,
         actions: input.actions,
@@ -2681,21 +2990,1007 @@ export class AttentionDomain {
     }));
   }
 
-  async recordSourceRun(feedId: string, sourceId: string, snapshots: unknown[], judgments: unknown[], checkpoint: unknown, triggerWorkId?: string, contextUse?: SourceRunContextUse): Promise<string> {
-    return this.store.serialize(async () => {
+  async recordSourceRun(feedId: string, sourceId: string, snapshots: unknown[], judgments: unknown[], checkpoint: unknown, triggerWorkId?: string, contextUse?: SourceRunContextUse, collectionProof?: SourceCollectionProof): Promise<string> {
+    return this.store.serializeAtomic(async () => {
       const feed = await this.store.readFeed(feedId);
-      if (!feed.sources.some((source) => source.id === sourceId)) throw new Error(`Source recipe not found: ${sourceId}`);
+      const source = feed.sources.find((item) => item.id === sourceId);
+      if (!source) throw new Error(`Source recipe not found: ${sourceId}`);
+      if (collectionProof && (typeof collectionProof !== "object" || Array.isArray(collectionProof))) throw new Error("Source collection proof must be an object.");
+      if (collectionProof && !["success", "no_change"].includes(collectionProof.outcome)) throw new Error("Source collection proof outcome must be success or no_change.");
+      if (collectionProof && (!collectionProof.completeness || typeof collectionProof.completeness !== "object" || Array.isArray(collectionProof.completeness))) {
+        throw new Error("Source collection proof completeness must be an object.");
+      }
+      if (collectionProof?.startedAt && !Number.isFinite(Date.parse(collectionProof.startedAt))) throw new Error("Source collection proof startedAt must be an ISO date-time.");
+      const observedIdentity = collectionProof ? normalizeIdentity(collectionProof.observedIdentity) : undefined;
+      if (source.profile && !collectionProof) throw new Error("Profiled sources require observed identity and completeness proof.");
+      if (source.profile && collectionProof && !sourceIdentityMatches(source.profile.expectedIdentity, observedIdentity!)) {
+        throw new Error("Observed source identity does not match the configured profile.");
+      }
+      if (
+        source.profile
+        && collectionProof
+        && (
+          collectionProof.completeness.identityVerified !== true
+          || collectionProof.completeness.scopeVerified !== true
+          || collectionProof.completeness.permissionsComplete !== true
+          || collectionProof.completeness.paginationComplete !== true
+          || collectionProof.completeness.backfillComplete !== true
+          || (collectionProof.completeness.watermark !== undefined && typeof collectionProof.completeness.watermark !== "string")
+        )
+      ) {
+        throw new Error("Successful source collection requires complete identity, scope, permissions, pagination, and backfill proof.");
+      }
       if (triggerWorkId) await this.assertClaimedRecollectionWork(feedId, triggerWorkId);
       const normalizedContextUse = contextUse
         ? normalizeContextUse(contextUse, await this.requireCurrentMindContext(contextUse.updateId), snapshots)
         : undefined;
       const runId = makeId("run");
+      const completedAt = isoNow();
       for (const [index, snapshot] of snapshots.entries()) await this.store.writeRawSnapshot(feedId, runId, sourceId, `snapshot-${index + 1}`, snapshot);
-      await this.store.writeRun({ id: runId, feedId, sourceId, snapshots: snapshots.length, judgments, ...(normalizedContextUse ? { contextUse: normalizedContextUse } : {}), ...(triggerWorkId ? { triggerWorkId } : {}), completedAt: isoNow() });
+      await this.store.writeRun({ id: runId, feedId, sourceId, snapshots: snapshots.length, judgments, ...(normalizedContextUse ? { contextUse: normalizedContextUse } : {}), ...(triggerWorkId ? { triggerWorkId } : {}), completedAt });
       await this.store.writeSourceCheckpoint(feedId, sourceId, checkpoint);
+      if (collectionProof) {
+        await this.store.appendSourceAttempt({
+          id: makeId("attempt"),
+          feedId,
+          sourceId,
+          outcome: collectionProof.outcome,
+          startedAt: collectionProof.startedAt ?? completedAt,
+          completedAt,
+          observedIdentity: observedIdentity!,
+          completeness: collectionProof.completeness,
+          runId,
+          ...(triggerWorkId ? { triggerWorkId } : {}),
+          checkpointAdvanced: collectionProof.outcome === "success",
+        });
+      }
       await this.store.appendEvent({ feedId, workId: triggerWorkId, type: "source.run_completed", detail: { runId, sourceId, triggerWorkId, snapshots: snapshots.length, judgments: judgments.length, contextUse: normalizedContextUse } });
       return runId;
     });
+  }
+
+  async recordSourceAttempt(
+    feedId: string,
+    sourceId: string,
+    input: {
+      outcome: Exclude<SourceAttemptOutcome, "success" | "no_change">;
+      observedIdentity?: SourceIdentity;
+      startedAt?: string;
+      triggerWorkId?: string;
+      error?: SourceAttempt["error"];
+    },
+  ): Promise<SourceAttempt> {
+    return this.store.serializeAtomic(async () => {
+      const allowedOutcomes = new Set<SourceAttemptOutcome>([
+        "partial",
+        "rate_limited",
+        "permission_denied",
+        "identity_mismatch",
+        "connector_unavailable",
+        "transient_error",
+        "authorization_required",
+        "paused",
+        "disconnected",
+      ]);
+      if (!allowedOutcomes.has(input.outcome)) throw new Error("Successful and no-change collections must be recorded as source runs with complete collection proof.");
+      if (input.startedAt && !Number.isFinite(Date.parse(input.startedAt))) throw new Error("Source attempt startedAt must be an ISO date-time.");
+      const observedIdentity = input.observedIdentity ? normalizeIdentity(input.observedIdentity) : undefined;
+      const feed = await this.store.readFeed(feedId);
+      if (!feed.sources.some((source) => source.id === sourceId)) throw new Error(`Source recipe not found: ${sourceId}`);
+      if (input.triggerWorkId) await this.assertClaimedRecollectionWork(feedId, input.triggerWorkId);
+      const completedAt = isoNow();
+      const normalizedError = normalizeSourceAttemptError(input.error);
+      const attempt: SourceAttempt = {
+        id: makeId("attempt"),
+        feedId,
+        sourceId,
+        outcome: input.outcome,
+        startedAt: input.startedAt ?? completedAt,
+        completedAt,
+        ...(observedIdentity ? { observedIdentity } : {}),
+        ...(input.triggerWorkId ? { triggerWorkId: input.triggerWorkId } : {}),
+        checkpointAdvanced: false,
+        ...(normalizedError ? { error: normalizedError } : {}),
+      };
+      await this.store.appendSourceAttempt(attempt);
+      await this.store.appendEvent({
+        feedId,
+        workId: input.triggerWorkId,
+        type: "source.attempt_failed",
+        detail: { attemptId: attempt.id, sourceId, outcome: attempt.outcome },
+      });
+      return attempt;
+    });
+  }
+
+  async recordCommitmentCandidate(
+    feedId: string,
+    input: CommitmentCandidateInput,
+  ): Promise<{ candidate: CommitmentCandidate; commitment: WorkspaceCommitment | null }> {
+    return this.store.serializeAtomic(async () => {
+      const promise = requiredMindText(input.normalized.promise, "Commitment promise", 500);
+      const deduplicationKey = requiredMindText(input.deduplicationKey, "Commitment deduplication key", 240);
+      const requestedSourceClass = requiredMindText(input.sourceClass, "Commitment source class", 80);
+      const judgmentPolicyVersion = requiredMindText(input.judgmentPolicyVersion, "Commitment judgment policy version", 80);
+      const judgmentModel = requiredMindText(input.judgmentModel, "Commitment judgment model", 120);
+      const judgmentRuntime = requiredMindText(input.judgmentRuntime, "Commitment judgment runtime", 120);
+      const judgmentRecipeDigest = requiredMindText(input.judgmentRecipeDigest, "Commitment judgment recipe digest", 128);
+      safeIdentifier(feedId, "Feed id");
+      safeIdentifier(input.sourceId, "Source id");
+      safeIdentifier(input.sourceRunId, "Source run id");
+      safeIdentifier(input.snapshotId, "Snapshot id");
+      if (input.sourceSignalKey) safeIdentifier(input.sourceSignalKey, "Commitment source signal key");
+      safeIdentifier(input.ownerHint.feedId, "Commitment owner feed id");
+      if (input.ownerHint.cardId) safeIdentifier(input.ownerHint.cardId, "Commitment owner card id");
+      if (!["explicit_first_person_bounded", "implied", "ambiguous"].includes(input.explicitness)) {
+        throw new Error("Commitment explicitness is unsupported.");
+      }
+      if (!["email", "calendar", "slack", "teams", "meeting_note", "message", "custom"].includes(input.signalKind)) {
+        throw new Error("Commitment signal kind is unsupported.");
+      }
+      if (!Number.isFinite(input.certainty) || input.certainty < 0 || input.certainty > 1) throw new Error("Commitment certainty must be between 0 and 1.");
+      if (input.normalized.dueAt && !Number.isFinite(Date.parse(input.normalized.dueAt))) throw new Error("Commitment dueAt must be an ISO date-time.");
+      if (input.priorityContext) {
+        requiredMindText(input.priorityContext.domain, "Commitment priority domain", 100);
+        if (!["low", "medium", "high", "severe"].includes(input.priorityContext.consequence)) {
+          throw new Error("Commitment consequence is unsupported.");
+        }
+        if (input.priorityContext.blocked !== undefined && typeof input.priorityContext.blocked !== "boolean") {
+          throw new Error("Commitment blocked state must be a boolean.");
+        }
+      }
+      await this.store.readConfig(input.ownerHint.feedId);
+      const run = await this.store.readRun(feedId, input.sourceRunId);
+      if (run.sourceId !== input.sourceId) throw new Error("Commitment candidate source does not match its source run.");
+      const source = (await this.store.readFeed(feedId)).sources.find((item) => item.id === input.sourceId);
+      const sourceClass = validatedCommitmentSourceClass(source?.profile?.provider, requestedSourceClass);
+      const qualityGate = commitmentQualityGate(sourceClass, judgmentPolicyVersion, {
+        model: judgmentModel,
+        runtime: judgmentRuntime,
+        recipeDigest: judgmentRecipeDigest,
+      });
+      const snapshotMatch = /^snapshot-(\d+)$/.exec(input.snapshotId);
+      if (!snapshotMatch || Number(snapshotMatch[1]) < 1 || Number(snapshotMatch[1]) > run.snapshots) {
+        throw new Error("Commitment candidate snapshot is not present in its source run.");
+      }
+
+      const legacySignalId = `${feedId}:${input.sourceRunId}:${input.snapshotId}`;
+      const sourceSignalKey = input.sourceSignalKey ?? digest({ deduplicationKey, promise }).slice(0, 24);
+      const signalId = `${legacySignalId}:${sourceSignalKey}`;
+      const replay = (await this.store.listCommitmentCandidates()).find((item) =>
+        item.signal.id === signalId
+        || (item.signal.id === legacySignalId && item.deduplicationKey === deduplicationKey),
+      );
+      if (replay) {
+        return {
+          candidate: replay,
+          commitment: replay.commitmentId ? await this.store.readWorkspaceCommitment(replay.commitmentId) : null,
+        };
+      }
+
+      const createdAt = isoNow();
+      const candidateId = makeId("candidate");
+      const candidate: CommitmentCandidate = {
+        id: candidateId,
+        feedId,
+        ...input,
+        deduplicationKey,
+        sourceClass,
+        judgmentPolicyVersion,
+        judgmentModel,
+        judgmentRuntime,
+        judgmentRecipeDigest,
+        qualityGatePassed: input.qualityGatePassed && qualityGate.passed,
+        qualityGate,
+        normalized: {
+          promise,
+          ...(input.normalized.deliverable ? { deliverable: requiredMindText(input.normalized.deliverable, "Commitment deliverable", 500) } : {}),
+          ...(input.normalized.owner ? { owner: requiredMindText(input.normalized.owner, "Commitment owner", 160) } : {}),
+          ...(input.normalized.dueAt ? { dueAt: new Date(input.normalized.dueAt).toISOString() } : {}),
+        },
+        signal: {
+          id: signalId,
+          candidateId,
+          feedId,
+          sourceId: input.sourceId,
+          sourceRunId: input.sourceRunId,
+          snapshotId: input.snapshotId,
+          kind: input.signalKind,
+          observedAt: run.completedAt ?? createdAt,
+          certainty: input.certainty,
+          explicitness: input.explicitness,
+        },
+        status: "pending_confirmation",
+        createdAt,
+      };
+
+      const canAutoCreate = candidate.explicitness === "explicit_first_person_bounded" && candidate.qualityGatePassed;
+      if (!canAutoCreate) {
+        const cardId = `confirm-${candidate.id}`;
+        candidate.confirmationCard = { feedId: input.ownerHint.feedId, cardId };
+        await this.writeCommitmentConfirmationCard(candidate, cardId);
+        await this.store.writeCommitmentCandidate(candidate);
+        return { candidate, commitment: null };
+      }
+
+      const existingCommitment = await this.store.findWorkspaceCommitmentByKey(candidate.deduplicationKey);
+      const needsLinkReview = existingCommitment && (
+        existingCommitment.owner.feedId !== feedId
+        || !commitmentCandidateMatches(existingCommitment, candidate)
+      );
+      if (existingCommitment && needsLinkReview) {
+        const cardId = `confirm-${candidate.id}`;
+        candidate.confirmationCard = { feedId: existingCommitment.owner.feedId, cardId };
+        candidate.reconciliation = {
+          kind: existingCommitment.owner.feedId !== feedId ? "cross_feed_link" : "same_feed_match_review",
+          proposedCommitmentId: existingCommitment.id,
+          expectedCommitmentVersion: existingCommitment.version,
+        };
+        await this.writeCommitmentConfirmationCard(candidate, cardId);
+        await this.store.writeCommitmentCandidate(candidate);
+        return { candidate, commitment: null };
+      }
+
+      const commitment = await this.linkCandidateToCommitment(candidate, {
+        feedId,
+        ...(candidate.ownerHint.feedId === feedId && candidate.ownerHint.cardId ? { cardId: candidate.ownerHint.cardId } : {}),
+      });
+      candidate.status = "linked";
+      candidate.commitmentId = commitment.id;
+      candidate.decidedAt = isoNow();
+      await this.store.writeCommitmentCandidate(candidate);
+      await this.refreshWorkspacePrioritiesLocked();
+      return { candidate, commitment };
+    });
+  }
+
+  async confirmCommitmentCandidate(candidateId: string, accept: boolean): Promise<{ candidate: CommitmentCandidate; commitment: WorkspaceCommitment | null }> {
+    return this.store.serializeAtomic(async () => {
+      const candidate = await this.store.readCommitmentCandidate(candidateId);
+      if (candidate.status !== "pending_confirmation") throw new Error("Commitment candidate has already been decided.");
+      const decidedAt = isoNow();
+      if (!accept) {
+        let separateCommitment: WorkspaceCommitment | null = null;
+        if (candidate.reconciliation) {
+          separateCommitment = await this.createCommitmentForCandidate(
+            candidate,
+            `${candidate.deduplicationKey}:separate:${candidate.id}`,
+            { feedId: candidate.feedId },
+          );
+          separateCommitment.signals = [candidate.signal];
+          const expectedVersion = separateCommitment.version;
+          separateCommitment.version += 1;
+          separateCommitment.updatedAt = decidedAt;
+          await this.store.writeWorkspaceCommitment(separateCommitment, expectedVersion);
+          await this.store.appendCommitmentEvent({
+            id: makeId("commitment-event"),
+            commitmentId: separateCommitment.id,
+            type: "signal_linked",
+            at: decidedAt,
+            detail: { signalId: candidate.signal.id, feedId: candidate.signal.feedId, sourceId: candidate.signal.sourceId },
+          });
+          await this.syncCommitmentCardAfterSignalMove(separateCommitment);
+          candidate.status = "accepted";
+          candidate.commitmentId = separateCommitment.id;
+          await this.store.appendCommitmentEvent({
+            id: makeId("commitment-event"),
+            commitmentId: separateCommitment.id,
+            type: "candidate_confirmed",
+            at: decidedAt,
+            detail: { candidateId, decision: "kept_separate", proposedCommitmentId: candidate.reconciliation.proposedCommitmentId },
+          });
+        } else {
+          candidate.status = "rejected";
+        }
+        candidate.decidedAt = decidedAt;
+        await this.store.writeCommitmentCandidate(candidate);
+        if (candidate.confirmationCard && await this.store.hasCard(candidate.confirmationCard.feedId, candidate.confirmationCard.cardId)) {
+          const card = await this.store.readCard(candidate.confirmationCard.feedId, candidate.confirmationCard.cardId);
+          card.status = "done";
+          card.completedAt = decidedAt;
+          card.completionDisposition = separateCommitment ? "completed" : "dismissed";
+          await this.store.writeCard(card);
+        }
+        if (separateCommitment) await this.refreshWorkspacePrioritiesLocked();
+        return { candidate, commitment: separateCommitment };
+      }
+      if (candidate.reconciliation) {
+        const proposed = await this.store.readWorkspaceCommitment(candidate.reconciliation.proposedCommitmentId);
+        if (proposed.version !== candidate.reconciliation.expectedCommitmentVersion) {
+          throw new Error("The proposed owner commitment changed; refresh the reconciliation card before linking this signal.");
+        }
+      }
+      const commitment = await this.linkCandidateToCommitment(candidate);
+      candidate.status = "accepted";
+      candidate.commitmentId = commitment.id;
+      candidate.decidedAt = decidedAt;
+      await this.store.writeCommitmentCandidate(candidate);
+      await this.store.appendCommitmentEvent({ id: makeId("commitment-event"), commitmentId: commitment.id, type: "candidate_confirmed", at: decidedAt, detail: { candidateId } });
+      if (candidate.confirmationCard && await this.store.hasCard(candidate.confirmationCard.feedId, candidate.confirmationCard.cardId)) {
+        const card = await this.store.readCard(candidate.confirmationCard.feedId, candidate.confirmationCard.cardId);
+        card.status = "done";
+        card.completedAt = decidedAt;
+        card.completionDisposition = "completed";
+        await this.store.writeCard(card);
+      }
+      await this.refreshWorkspacePrioritiesLocked();
+      return { candidate, commitment };
+    });
+  }
+
+  async transitionCommitment(commitmentId: string, status: CommitmentLifecycle, reason: string): Promise<WorkspaceCommitment> {
+    return this.store.serializeAtomic(async () => {
+      const commitment = await this.store.readWorkspaceCommitment(commitmentId);
+      return this.transitionCommitmentLocked(commitment, status, reason);
+    });
+  }
+
+  async recordCommitmentCompletionEvidence(
+    commitmentId: string,
+    input: {
+      sourceFeedId: string;
+      sourceId: string;
+      sourceRunId: string;
+      snapshotId: string;
+      evidenceKind: "clear_completion" | "ambiguous_completion" | "contradiction";
+      summary: string;
+    },
+  ): Promise<WorkspaceCommitment> {
+    return this.store.serializeAtomic(async () => {
+      safeIdentifier(input.sourceFeedId, "Completion evidence feed");
+      safeIdentifier(input.sourceId, "Completion evidence source");
+      safeIdentifier(input.sourceRunId, "Completion evidence run");
+      safeIdentifier(input.snapshotId, "Completion evidence snapshot");
+      if (!["clear_completion", "ambiguous_completion", "contradiction"].includes(input.evidenceKind)) {
+        throw new Error("Completion evidence kind is unsupported.");
+      }
+      const summary = requiredMindText(input.summary, "Completion evidence summary", 500);
+      const run = await this.store.readRun(input.sourceFeedId, input.sourceRunId);
+      if (run.sourceId !== input.sourceId) throw new Error("Completion evidence source does not match its source run.");
+      const snapshotMatch = /^snapshot-(\d+)$/.exec(input.snapshotId);
+      if (!snapshotMatch || Number(snapshotMatch[1]) < 1 || Number(snapshotMatch[1]) > run.snapshots) {
+        throw new Error("Completion evidence snapshot is not present in its source run.");
+      }
+      const evidenceKey = `${input.sourceFeedId}:${input.sourceRunId}:${input.snapshotId}:${input.evidenceKind}`;
+      const prior = (await this.store.listCommitmentEvents(commitmentId)).find((event) =>
+        event.type === "completion_evidence" && event.detail.evidenceKey === evidenceKey,
+      );
+      if (prior) return this.store.readWorkspaceCommitment(commitmentId);
+
+      const commitment = await this.store.readWorkspaceCommitment(commitmentId);
+      const targetStatus: CommitmentLifecycle = input.evidenceKind === "clear_completion"
+        ? "fulfilled"
+        : input.evidenceKind === "ambiguous_completion"
+          ? "completion_pending"
+          : "reopened";
+      if (commitment.status !== targetStatus) assertCommitmentTransition(commitment.status, targetStatus);
+      const at = isoNow();
+      await this.store.appendCommitmentEvent({
+        id: makeId("commitment-event"),
+        commitmentId,
+        type: "completion_evidence",
+        at,
+        detail: {
+          evidenceKey,
+          evidenceKind: input.evidenceKind,
+          sourceFeedId: input.sourceFeedId,
+          sourceId: input.sourceId,
+          sourceRunId: input.sourceRunId,
+          snapshotId: input.snapshotId,
+          summary,
+        },
+      });
+      if (commitment.status === targetStatus) return commitment;
+      return this.transitionCommitmentLocked(
+        commitment,
+        targetStatus,
+        summary,
+        { evidenceKey, evidenceKind: input.evidenceKind },
+      );
+    });
+  }
+
+  private async transitionCommitmentLocked(
+    commitment: WorkspaceCommitment,
+    status: CommitmentLifecycle,
+    reason: string,
+    detail: Record<string, unknown> = {},
+  ): Promise<WorkspaceCommitment> {
+    assertCommitmentTransition(commitment.status, status);
+    const previous = commitment.status;
+    const expectedVersion = commitment.version;
+    commitment.status = status;
+    commitment.version += 1;
+    commitment.updatedAt = isoNow();
+    await this.store.writeWorkspaceCommitment(commitment, expectedVersion);
+    await this.store.appendCommitmentEvent({
+      id: makeId("commitment-event"),
+      commitmentId: commitment.id,
+      type: "lifecycle_changed",
+      at: commitment.updatedAt,
+      detail: { previous, status, reason: requiredMindText(reason, "Commitment transition reason", 500), ...detail },
+    });
+    if (await this.store.hasCard(commitment.owner.feedId, commitment.owner.cardId)) {
+      const card = await this.store.readCard(commitment.owner.feedId, commitment.owner.cardId);
+      if (status === "fulfilled" || status === "withdrawn" || status === "superseded") {
+        card.status = "done";
+        card.completedAt = commitment.updatedAt;
+        card.completionDisposition = "completed";
+      } else if (previous === "fulfilled" || previous === "withdrawn" || previous === "superseded") {
+        card.status = "to_review_updated";
+        card.completedAt = undefined;
+        card.completionDisposition = undefined;
+      } else if (status === "completion_pending" || status === "reopened") {
+        card.status = "to_review_updated";
+        card.readyForPass = (await this.store.readConfig(card.feedId)).currentPass;
+      }
+      await this.store.writeCard(card);
+    }
+    await this.refreshWorkspacePrioritiesLocked();
+    return commitment;
+  }
+
+  async rehomeCommitment(
+    commitmentId: string,
+    input: { targetFeedId: string; expectedVersion: number; reason: string; targetCardId?: string },
+  ): Promise<WorkspaceCommitment> {
+    return this.store.serializeAtomic(async () => {
+      const commitment = await this.store.readWorkspaceCommitment(commitmentId);
+      if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+        throw new Error("Commitment re-home requires a positive expected version.");
+      }
+      if (commitment.version !== input.expectedVersion) {
+        throw new Error("The workspace commitment changed; refresh before re-homing it.");
+      }
+      const targetFeedId = safeIdentifier(requiredMindText(input.targetFeedId, "Commitment target feed", 100), "Commitment target feed");
+      if (targetFeedId === commitment.owner.feedId) throw new Error("The commitment is already owned by that feed.");
+      const reason = requiredMindText(input.reason, "Commitment re-home reason", 500);
+      const targetConfig = await this.store.readConfig(targetFeedId);
+      const ownerWork = (await this.store.readWorkItems(commitment.owner.feedId)).filter((work) =>
+        work.cardId === commitment.owner.cardId && ["queued", "working", "approved_blocked"].includes(work.status),
+      );
+      if (ownerWork.length) {
+        throw new Error("Commitment ownership cannot move while its owner card has queued, working, or approved work.");
+      }
+      const sourceCard = await this.store.readCard(commitment.owner.feedId, commitment.owner.cardId);
+      const hasExternalAction = Boolean(sourceCard.proposedAction?.externalMutation)
+        || Boolean(sourceCard.actions?.some((action) => action.externalMutation));
+      if (hasExternalAction) {
+        throw new Error("Commitment ownership cannot move while its card carries an external mutation CTA; replace it with a target-feed action context first.");
+      }
+      const targetCardId = input.targetCardId
+        ? safeIdentifier(requiredMindText(input.targetCardId, "Commitment target card", 160), "Commitment target card")
+        : sourceCard.id;
+      if (await this.store.hasCard(targetFeedId, targetCardId)) {
+        throw new Error("The target feed already contains that card id; choose a different target card id.");
+      }
+
+      const at = isoNow();
+      const previousOwner = commitment.owner;
+      const nextOwner = { feedId: targetFeedId, cardId: targetCardId };
+      const targetCard: Card = {
+        ...sourceCard,
+        id: targetCardId,
+        feedId: targetFeedId,
+        readyForPass: targetConfig.currentPass,
+        sourceRunIds: undefined,
+        updatedAt: at,
+        history: [...sourceCard.history, { at, type: "user.commitment_owner_changed", detail: reason }],
+      };
+      const expectedVersion = commitment.version;
+      commitment.owner = nextOwner;
+      commitment.version += 1;
+      commitment.updatedAt = at;
+      await this.store.writeWorkspaceCommitment(commitment, expectedVersion);
+      await this.store.writeCard(targetCard);
+      await this.store.removeCard(previousOwner.feedId, previousOwner.cardId);
+      await this.store.appendCommitmentEvent({
+        id: makeId("commitment-event"),
+        commitmentId,
+        type: "owner_changed",
+        at,
+        detail: { previousOwner, nextOwner, reason, expectedVersion },
+      });
+      await this.refreshWorkspacePrioritiesLocked();
+      return commitment;
+    });
+  }
+
+  async recordCommitmentSignalChange(
+    candidateId: string,
+    input: {
+      kind: "edited" | "deleted" | "retracted" | "conflict";
+      reason: string;
+      evidenceRunId?: string;
+      evidenceSnapshotId?: string;
+    },
+  ): Promise<WorkspaceCommitment> {
+    return this.store.serializeAtomic(async () => {
+      if (!["edited", "deleted", "retracted", "conflict"].includes(input.kind)) throw new Error("Commitment signal change kind is unsupported.");
+      const reason = requiredMindText(input.reason, "Commitment signal change reason", 500);
+      const candidate = await this.store.readCommitmentCandidate(candidateId);
+      if (!candidate.commitmentId) throw new Error("Only a linked commitment candidate can record a source change.");
+      if (Boolean(input.evidenceRunId) !== Boolean(input.evidenceSnapshotId)) {
+        throw new Error("Commitment signal change evidence requires both run and snapshot ids.");
+      }
+      if (input.evidenceRunId && input.evidenceSnapshotId) {
+        safeIdentifier(input.evidenceRunId, "Commitment signal change run");
+        safeIdentifier(input.evidenceSnapshotId, "Commitment signal change snapshot");
+        const run = await this.store.readRun(candidate.feedId, input.evidenceRunId);
+        if (run.sourceId !== candidate.sourceId) throw new Error("Commitment signal change evidence does not match the original source.");
+        const snapshotMatch = /^snapshot-(\d+)$/.exec(input.evidenceSnapshotId);
+        if (!snapshotMatch || Number(snapshotMatch[1]) < 1 || Number(snapshotMatch[1]) > run.snapshots) {
+          throw new Error("Commitment signal change snapshot is not present in its source run.");
+        }
+      }
+      const evidenceKey = `${candidate.id}:${input.kind}:${input.evidenceRunId ?? "no-run"}:${input.evidenceSnapshotId ?? "no-snapshot"}`;
+      const events = await this.store.listCommitmentEvents(candidate.commitmentId);
+      if (events.some((event) => event.type === "signal_changed" && event.detail.evidenceKey === evidenceKey)) {
+        return this.store.readWorkspaceCommitment(candidate.commitmentId);
+      }
+      const commitment = await this.store.readWorkspaceCommitment(candidate.commitmentId);
+      const at = isoNow();
+      await this.store.appendCommitmentEvent({
+        id: makeId("commitment-event"),
+        commitmentId: commitment.id,
+        type: "signal_changed",
+        at,
+        detail: {
+          evidenceKey,
+          candidateId,
+          signalId: candidate.signal.id,
+          kind: input.kind,
+          reason,
+          ...(input.evidenceRunId ? { evidenceRunId: input.evidenceRunId, evidenceSnapshotId: input.evidenceSnapshotId } : {}),
+        },
+      });
+      if (await this.store.hasCard(commitment.owner.feedId, commitment.owner.cardId)) {
+        const card = await this.store.readCard(commitment.owner.feedId, commitment.owner.cardId);
+        card.blocks = [
+          ...card.blocks.filter((block) => block.id !== `signal-change-${candidate.id}`),
+          { id: `signal-change-${candidate.id}`, type: "clarification", label: "Source evidence changed", text: `${input.kind}: ${reason}` },
+        ];
+        card.status = "to_review_updated";
+        card.readyForPass = (await this.store.readConfig(card.feedId)).currentPass;
+        card.completedAt = undefined;
+        card.completionDisposition = undefined;
+        await this.store.writeCard(card);
+      }
+      return commitment;
+    });
+  }
+
+  async splitCommitmentCandidate(
+    candidateId: string,
+    input: { deduplicationKey: string; reason: string; ownerFeedId?: string },
+  ): Promise<{ source: WorkspaceCommitment; target: WorkspaceCommitment; candidate: CommitmentCandidate }> {
+    return this.store.serializeAtomic(async () => {
+      const candidate = await this.store.readCommitmentCandidate(candidateId);
+      if (!candidate.commitmentId) throw new Error("Only a linked commitment candidate can be split.");
+      const source = await this.store.readWorkspaceCommitment(candidate.commitmentId);
+      const deduplicationKey = requiredMindText(input.deduplicationKey, "Split commitment deduplication key", 240);
+      if (deduplicationKey === source.deduplicationKey) throw new Error("A split requires a new commitment deduplication key.");
+      if (await this.store.findWorkspaceCommitmentByKey(deduplicationKey)) {
+        throw new Error("That commitment key already exists; relink the candidate to the existing commitment instead.");
+      }
+      const ownerFeedId = input.ownerFeedId
+        ? requiredMindText(input.ownerFeedId, "Split commitment owner feed", 100)
+        : source.owner.feedId;
+      safeIdentifier(ownerFeedId, "Split commitment owner feed");
+      await this.store.readConfig(ownerFeedId);
+      const target = await this.createCommitmentForCandidate(candidate, deduplicationKey, { feedId: ownerFeedId });
+      const moved = await this.moveCommitmentCandidate(candidate, source, target, input.reason, "split");
+      await this.refreshWorkspacePrioritiesLocked();
+      return moved;
+    });
+  }
+
+  async relinkCommitmentCandidate(
+    candidateId: string,
+    targetCommitmentId: string,
+    reason: string,
+  ): Promise<{ source: WorkspaceCommitment; target: WorkspaceCommitment; candidate: CommitmentCandidate }> {
+    return this.store.serializeAtomic(async () => {
+      const candidate = await this.store.readCommitmentCandidate(candidateId);
+      if (!candidate.commitmentId) throw new Error("Only a linked commitment candidate can be relinked.");
+      if (candidate.commitmentId === targetCommitmentId) throw new Error("The candidate is already linked to that commitment.");
+      const source = await this.store.readWorkspaceCommitment(candidate.commitmentId);
+      const target = await this.store.readWorkspaceCommitment(targetCommitmentId);
+      if (["fulfilled", "withdrawn"].includes(target.status) || (target.status === "superseded" && target.signals.length > 0)) {
+        throw new Error("Commitment signals can only be relinked to an active commitment or an empty commitment superseded by a prior correction.");
+      }
+      const moved = await this.moveCommitmentCandidate(candidate, source, target, reason, "relink");
+      await this.refreshWorkspacePrioritiesLocked();
+      return moved;
+    });
+  }
+
+  private async writeCommitmentConfirmationCard(candidate: CommitmentCandidate, cardId: string): Promise<void> {
+    const cardFeedId = candidate.confirmationCard?.feedId ?? candidate.ownerHint.feedId;
+    const reconciliation = Boolean(candidate.reconciliation);
+    const config = await this.store.readConfig(cardFeedId);
+    const now = isoNow();
+    await this.store.writeCard({
+      id: cardId,
+      feedId: cardFeedId,
+      kind: "attention",
+      status: "to_review_new",
+      title: reconciliation ? `Link another source to: ${candidate.normalized.promise}` : `Is this your commitment? ${candidate.normalized.promise}`,
+      eyebrow: reconciliation ? "Owner-feed reconciliation" : "Commitment confirmation",
+      why: reconciliation
+        ? candidate.reconciliation?.kind === "cross_feed_link"
+          ? "A different feed found matching evidence. The owning feed must approve the version-bound link before its canonical card changes."
+          : "The deduplication key matches, but normalized obligation fields differ. Review the version-bound link instead of silently merging."
+        : candidate.qualityGatePassed ? "The source language is ambiguous." : "This source class has not passed the automatic extraction quality gate.",
+      blocks: [{ id: "candidate", type: "clarification", label: reconciliation ? "Link or keep separate" : "Confirm or reject", text: candidate.normalized.promise }],
+      actions: [
+        {
+          id: "accept-commitment",
+          label: reconciliation ? "Link this source" : "Yes, add this commitment",
+          behavior: "queue_instruction",
+          instruction: `Confirm commitment candidate ${candidate.id} with \`commitment:candidate:confirm --candidate ${candidate.id} --accept\`, then report the canonical commitment and owner card.`,
+          variant: "primary",
+          shortcut: "y",
+        },
+        {
+          id: "reject-commitment",
+          label: reconciliation ? "Keep as separate commitment" : "No, reject this commitment",
+          behavior: "queue_instruction",
+          instruction: reconciliation
+            ? `Keep candidate ${candidate.id} separate with \`commitment:candidate:confirm --candidate ${candidate.id} --reject\`, then report both canonical commitments.`
+            : `Reject commitment candidate ${candidate.id} with \`commitment:candidate:confirm --candidate ${candidate.id} --reject\`, then report that no authoritative commitment was created.`,
+          variant: "secondary",
+          shortcut: "n",
+        },
+      ],
+      readyForPass: config.currentPass,
+      createdAt: now,
+      updatedAt: now,
+      history: [],
+    });
+  }
+
+  private async linkCandidateToCommitment(
+    candidate: CommitmentCandidate,
+    ownerHint: { feedId: string; cardId?: string } = candidate.ownerHint,
+  ): Promise<WorkspaceCommitment> {
+    let commitment = await this.store.findWorkspaceCommitmentByKey(candidate.deduplicationKey);
+    if (!commitment) {
+      commitment = await this.createCommitmentForCandidate(candidate, candidate.deduplicationKey, ownerHint);
+    }
+
+    if (!commitment.signals.some((signal) => signal.id === candidate.signal.id)) {
+      const expectedVersion = commitment.version;
+      commitment = {
+        ...commitment,
+        version: commitment.version + 1,
+        certainty: Math.max(commitment.certainty, candidate.certainty),
+        signals: [...commitment.signals, candidate.signal],
+        updatedAt: isoNow(),
+      };
+      await this.store.writeWorkspaceCommitment(commitment, expectedVersion);
+      await this.store.appendCommitmentEvent({
+        id: makeId("commitment-event"),
+        commitmentId: commitment.id,
+        type: "signal_linked",
+        at: commitment.updatedAt,
+        detail: { signalId: candidate.signal.id, feedId: candidate.signal.feedId, sourceId: candidate.signal.sourceId },
+      });
+      const card = await this.store.readCard(commitment.owner.feedId, commitment.owner.cardId);
+      card.blocks = [
+        ...card.blocks.filter((block) => block.id !== "source-receipts"),
+        { id: "source-receipts", type: "receipt", label: "Source receipts", text: `${commitment.signals.length} attributable source receipt${commitment.signals.length === 1 ? "" : "s"}.` },
+      ];
+      await this.store.writeCard(card);
+    }
+    return commitment;
+  }
+
+  private async createCommitmentForCandidate(
+    candidate: CommitmentCandidate,
+    deduplicationKey: string,
+    ownerHint: { feedId: string; cardId?: string },
+  ): Promise<WorkspaceCommitment> {
+    const ownerFeedId = ownerHint.feedId;
+    const ownerCardId = ownerHint.cardId ?? `commitment-${digest(deduplicationKey).slice(0, 20)}`;
+    const now = isoNow();
+    const existingOwnerCard = await this.store.hasCard(ownerFeedId, ownerCardId)
+      ? await this.store.readCard(ownerFeedId, ownerCardId)
+      : null;
+    if (existingOwnerCard?.commitmentId) throw new Error("The selected owner card already belongs to another commitment.");
+    const commitment: WorkspaceCommitment = {
+      id: makeId("commitment"),
+      version: 1,
+      deduplicationKey,
+      owner: { feedId: ownerFeedId, cardId: ownerCardId },
+      promise: candidate.normalized.promise,
+      ...(candidate.normalized.deliverable ? { deliverable: candidate.normalized.deliverable } : {}),
+      ...(candidate.normalized.owner ? { counterparty: candidate.normalized.owner } : {}),
+      ...(candidate.normalized.dueAt ? { dueAt: candidate.normalized.dueAt } : {}),
+      certainty: candidate.certainty,
+      status: "open",
+      priorityContext: candidate.priorityContext ?? { domain: ownerFeedId, consequence: "medium" },
+      signals: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    await this.store.writeWorkspaceCommitment(commitment);
+    await this.store.appendCommitmentEvent({ id: makeId("commitment-event"), commitmentId: commitment.id, type: "created", at: now, detail: { owner: commitment.owner } });
+    if (existingOwnerCard) {
+      await this.store.writeCard({ ...existingOwnerCard, commitmentId: commitment.id, updatedAt: now });
+    } else {
+      const config = await this.store.readConfig(ownerFeedId);
+      await this.store.writeCard({
+        id: ownerCardId,
+        feedId: ownerFeedId,
+        kind: "attention",
+        status: "to_review_new",
+        title: commitment.promise,
+        eyebrow: "Commitment",
+        why: "An explicit first-person bounded promise was captured from a validated source class.",
+        commitmentId: commitment.id,
+        blocks: [{ id: "commitment", type: "memo", label: "Promise", text: commitment.promise }],
+        actions: [],
+        readyForPass: config.currentPass,
+        createdAt: now,
+        updatedAt: now,
+        history: [],
+      });
+    }
+    return commitment;
+  }
+
+  private async moveCommitmentCandidate(
+    candidate: CommitmentCandidate,
+    source: WorkspaceCommitment,
+    target: WorkspaceCommitment,
+    reason: string,
+    operation: "split" | "relink",
+  ): Promise<{ source: WorkspaceCommitment; target: WorkspaceCommitment; candidate: CommitmentCandidate }> {
+    const normalizedReason = requiredMindText(reason, "Commitment link correction reason", 500);
+    if (!source.signals.some((signal) => signal.id === candidate.signal.id)) {
+      throw new Error("The candidate signal is no longer linked to its recorded commitment.");
+    }
+    const at = isoNow();
+    const sourceVersion = source.version;
+    const sourceStatus = source.status;
+    const sourceBecomesEmpty = source.signals.length === 1;
+    if (sourceBecomesEmpty) assertCommitmentTransition(source.status, "superseded");
+    source.signals = source.signals.filter((signal) => signal.id !== candidate.signal.id);
+    source.version += 1;
+    source.updatedAt = at;
+    if (sourceBecomesEmpty) source.status = "superseded";
+    await this.store.writeWorkspaceCommitment(source, sourceVersion);
+
+    if (!target.signals.some((signal) => signal.id === candidate.signal.id)) {
+      const targetVersion = target.version;
+      const reopensTarget = target.status === "superseded" && target.signals.length === 0;
+      if (reopensTarget) assertCommitmentTransition(target.status, "reopened");
+      target.signals = [...target.signals, candidate.signal];
+      target.certainty = Math.max(target.certainty, candidate.certainty);
+      if (reopensTarget) target.status = "reopened";
+      target.version += 1;
+      target.updatedAt = at;
+      await this.store.writeWorkspaceCommitment(target, targetVersion);
+      if (reopensTarget) {
+        await this.store.appendCommitmentEvent({
+          id: makeId("commitment-event"),
+          commitmentId: target.id,
+          type: "lifecycle_changed",
+          at,
+          detail: { from: "superseded", to: "reopened", reason: normalizedReason },
+        });
+      }
+    }
+    candidate.commitmentId = target.id;
+    candidate.decidedAt = at;
+    await this.store.writeCommitmentCandidate(candidate);
+
+    await this.store.appendCommitmentEvent({
+      id: makeId("commitment-event"),
+      commitmentId: source.id,
+      type: operation === "split" ? "split" : "signal_relinked",
+      at,
+      detail: { candidateId: candidate.id, signalId: candidate.signal.id, toCommitmentId: target.id, reason: normalizedReason },
+    });
+    if (sourceBecomesEmpty) {
+      await this.store.appendCommitmentEvent({
+        id: makeId("commitment-event"),
+        commitmentId: source.id,
+        type: "lifecycle_changed",
+        at,
+        detail: { from: sourceStatus, to: "superseded", reason: normalizedReason },
+      });
+    }
+    await this.store.appendCommitmentEvent({
+      id: makeId("commitment-event"),
+      commitmentId: target.id,
+      type: operation === "split" ? "split" : "signal_relinked",
+      at,
+      detail: { candidateId: candidate.id, signalId: candidate.signal.id, fromCommitmentId: source.id, reason: normalizedReason },
+    });
+    await this.syncCommitmentCardAfterSignalMove(source);
+    await this.syncCommitmentCardAfterSignalMove(target);
+    return { source, target, candidate };
+  }
+
+  private async syncCommitmentCardAfterSignalMove(commitment: WorkspaceCommitment): Promise<void> {
+    if (!(await this.store.hasCard(commitment.owner.feedId, commitment.owner.cardId))) return;
+    const card = await this.store.readCard(commitment.owner.feedId, commitment.owner.cardId);
+    card.blocks = [
+      ...card.blocks.filter((block) => block.id !== "source-receipts"),
+      ...(commitment.signals.length ? [{
+        id: "source-receipts",
+        type: "receipt" as const,
+        label: "Source receipts",
+        text: `${commitment.signals.length} attributable source receipt${commitment.signals.length === 1 ? "" : "s"}.`,
+      }] : []),
+    ];
+    if (commitment.status === "superseded") {
+      card.status = "done";
+      card.completedAt = commitment.updatedAt;
+      card.completionDisposition = "completed";
+    } else if (card.status === "done") {
+      card.status = "to_review_updated";
+      card.completedAt = undefined;
+      card.completionDisposition = undefined;
+    }
+    card.updatedAt = commitment.updatedAt;
+    await this.store.writeCard(card);
+  }
+
+  async activateInitialPriorityRules(rules: PriorityRuleDefinition, reason: string): Promise<PriorityRuleSet> {
+    return this.store.serializeAtomic(async () => {
+      if (await this.store.readActivePriorityRuleSet()) throw new Error("An active priority rule set already exists; propose a correction instead.");
+      const normalized = this.validatePriorityRules(rules);
+      const at = isoNow();
+      const ruleSet: PriorityRuleSet = {
+        id: makeId("priority-rules"),
+        version: 1,
+        status: "active",
+        rules: normalized,
+        reason: requiredMindText(reason, "Priority rule approval reason", 500),
+        createdAt: at,
+        approvedAt: at,
+      };
+      await this.store.writePriorityRuleSet(ruleSet);
+      await this.store.appendPriorityLedger({ id: makeId("priority-ledger"), type: "approval", at, ruleVersion: ruleSet.version, detail: { ruleSetId: ruleSet.id, reason: ruleSet.reason, rules: ruleSet.rules } });
+      await this.refreshWorkspacePrioritiesLocked(DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION);
+      return ruleSet;
+    });
+  }
+
+  async evaluateWorkspacePriorities(judgmentPolicyVersion: string, now = new Date()): Promise<WorkspaceNowRow[]> {
+    return this.store.serializeAtomic(() => this.evaluateWorkspacePrioritiesLocked(judgmentPolicyVersion, now));
+  }
+
+  async refreshWorkspacePriorities(
+    judgmentPolicyVersion = DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION,
+    now = new Date(),
+  ): Promise<WorkspaceNowRow[]> {
+    return this.store.serializeAtomic(() => this.refreshWorkspacePrioritiesLocked(judgmentPolicyVersion, now));
+  }
+
+  private async refreshWorkspacePrioritiesLocked(
+    judgmentPolicyVersion = DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION,
+    now = new Date(),
+  ): Promise<WorkspaceNowRow[]> {
+    if (!(await this.store.readActivePriorityRuleSet())) return this.store.readWorkspaceNowProjection();
+    return this.evaluateWorkspacePrioritiesLocked(judgmentPolicyVersion, now);
+  }
+
+  private async evaluateWorkspacePrioritiesLocked(judgmentPolicyVersion: string, now: Date): Promise<WorkspaceNowRow[]> {
+    const policyVersion = requiredMindText(judgmentPolicyVersion, "Priority judgment policy version", 80);
+    const ruleSet = await this.store.readActivePriorityRuleSet();
+    if (!ruleSet) throw new Error("Priority rules are not configured; ordering is unavailable rather than model-guessed.");
+    const rows = evaluatePriorityRows(await this.store.listWorkspaceCommitments(), ruleSet, policyVersion, now);
+    const previous = await this.store.readWorkspaceNowProjection();
+    if (previous.length === rows.length && previous.every((row, index) => row.id === rows[index]?.id && row.inputDigest === rows[index]?.inputDigest)) return previous;
+
+    const previousById = new Map(previous.map((row) => [row.id, row]));
+    for (const row of rows) {
+      if (previousById.get(row.id)?.inputDigest === row.inputDigest) continue;
+      await this.store.appendPriorityLedger({
+        id: makeId("priority-ledger"),
+        type: "evaluation",
+        at: row.evaluatedAt,
+        commitmentId: row.commitmentId,
+        ruleVersion: row.ruleVersion,
+        inputDigest: row.inputDigest,
+        detail: {
+          rank: row.rank,
+          score: row.score,
+          explanation: row.explanation,
+          judgmentPolicyVersion: row.judgmentPolicyVersion,
+          judgmentModel: row.judgmentModel,
+          judgmentRuntime: row.judgmentRuntime,
+          judgmentRecipeDigest: row.judgmentRecipeDigest,
+        },
+      });
+      if (row.overrideReason) {
+        await this.store.appendPriorityLedger({
+          id: makeId("priority-ledger"),
+          type: "override",
+          at: row.evaluatedAt,
+          commitmentId: row.commitmentId,
+          ruleVersion: row.ruleVersion,
+          inputDigest: row.inputDigest,
+          detail: { rank: row.rank, reason: row.overrideReason },
+        });
+      }
+    }
+    await this.store.replaceWorkspaceNowProjection(rows);
+    return rows;
+  }
+
+  async recordPriorityCorrection(input: {
+    preferredCommitmentId: string;
+    overCommitmentId: string;
+    reason: string;
+    proposedRules: PriorityRuleDefinition;
+  }): Promise<PriorityRuleProposal> {
+    return this.store.serializeAtomic(async () => {
+      await this.store.readWorkspaceCommitment(input.preferredCommitmentId);
+      await this.store.readWorkspaceCommitment(input.overCommitmentId);
+      if (input.preferredCommitmentId === input.overCommitmentId) throw new Error("A priority correction requires two different commitments.");
+      const active = await this.store.readActivePriorityRuleSet();
+      if (!active) throw new Error("Priority rules are not configured.");
+      const at = isoNow();
+      const proposal: PriorityRuleProposal = {
+        id: makeId("priority-proposal"),
+        baseVersion: active.version,
+        preferredCommitmentId: input.preferredCommitmentId,
+        overCommitmentId: input.overCommitmentId,
+        reason: requiredMindText(input.reason, "Priority correction reason", 500),
+        proposedRules: this.validatePriorityRules(input.proposedRules),
+        status: "proposed",
+        createdAt: at,
+      };
+      await this.store.writePriorityRuleProposal(proposal);
+      await this.store.appendPriorityLedger({ id: makeId("priority-ledger"), type: "correction", at, ruleVersion: active.version, detail: { proposalId: proposal.id, preferredCommitmentId: proposal.preferredCommitmentId, overCommitmentId: proposal.overCommitmentId, reason: proposal.reason } });
+      await this.store.appendPriorityLedger({ id: makeId("priority-ledger"), type: "proposal", at, ruleVersion: active.version, detail: { proposalId: proposal.id, proposedRules: proposal.proposedRules } });
+      return proposal;
+    });
+  }
+
+  async approvePriorityRuleProposal(proposalId: string): Promise<PriorityRuleSet> {
+    return this.store.serializeAtomic(async () => {
+      const proposal = await this.store.readPriorityRuleProposal(proposalId);
+      if (proposal.status !== "proposed") throw new Error("Priority rule proposal has already been decided.");
+      const active = await this.store.readActivePriorityRuleSet();
+      if (!active || active.version !== proposal.baseVersion) throw new Error("Priority rule proposal is stale; review it against the active rules.");
+      const at = isoNow();
+      active.status = "superseded";
+      await this.store.writePriorityRuleSet(active);
+      const next: PriorityRuleSet = {
+        id: makeId("priority-rules"),
+        version: active.version + 1,
+        status: "active",
+        rules: proposal.proposedRules,
+        reason: proposal.reason,
+        createdAt: at,
+        approvedAt: at,
+      };
+      await this.store.writePriorityRuleSet(next);
+      proposal.status = "approved";
+      proposal.decidedAt = at;
+      proposal.activatedRuleSetId = next.id;
+      await this.store.writePriorityRuleProposal(proposal);
+      await this.store.appendPriorityLedger({ id: makeId("priority-ledger"), type: "approval", at, ruleVersion: next.version, detail: { proposalId, ruleSetId: next.id, previousRuleSetId: active.id, rules: next.rules } });
+      await this.refreshWorkspacePrioritiesLocked(DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION);
+      return next;
+    });
+  }
+
+  private validatePriorityRules(rules: PriorityRuleDefinition): PriorityRuleDefinition {
+    if (!Array.isArray(rules.domainOrder) || !rules.domainOrder.length) throw new Error("Priority rules require at least one domain.");
+    const domainOrder = rules.domainOrder.map((domain, index) => requiredMindText(domain, `Priority domain ${index + 1}`, 100));
+    if (new Set(domainOrder).size !== domainOrder.length) throw new Error("Priority domain order must not contain duplicates.");
+    if (!Number.isInteger(rules.imminentWithinMinutes) || rules.imminentWithinMinutes < 1 || rules.imminentWithinMinutes > 10_080) {
+      throw new Error("Priority imminent window must be between 1 minute and 7 days.");
+    }
+    if (typeof rules.severeConsequenceOverride !== "boolean") throw new Error("Priority severe-consequence override must be explicit.");
+    return { domainOrder, imminentWithinMinutes: rules.imminentWithinMinutes, severeConsequenceOverride: rules.severeConsequenceOverride };
   }
 
   async recordSweepBatch(feedId: string, sourceRunIds: string[], triggerWorkId?: string, contextUpdateId?: string): Promise<string> {

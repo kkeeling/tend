@@ -5,10 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { attentionDataDir, attentionDbPath, attentionHome } from "../paths";
 import { SQLITE_SCHEMA_VERSION } from "../sqlite";
-import { withMutationLock } from "../util";
+import { configurePrivateProcessPermissions, ensurePrivateDirectory, hardenPrivateTree, PRIVATE_FILE_MODE, withMutationLock } from "../util";
 import { apiUrl, initRuntime, print } from "./shared";
 
 export async function backupExportCommand(targetPath: string): Promise<void> {
+  configurePrivateProcessPermissions();
   const target = path.resolve(targetPath);
   if (existsSync(target)) {
     throw new Error(`Backup target already exists: ${target}. Choose a new empty path.`);
@@ -32,7 +33,8 @@ export async function backupExportCommand(targetPath: string): Promise<void> {
           exportedAt: new Date().toISOString(),
           dataDir: attentionDataDir(),
           dbPath: attentionDbPath(),
-        }, null, 2));
+        }, null, 2), { mode: PRIVATE_FILE_MODE });
+        await hardenPrivateTree(stage);
         await rename(stage, target);
       } finally {
         sqlite.close();
@@ -46,6 +48,7 @@ export async function backupExportCommand(targetPath: string): Promise<void> {
 }
 
 export async function backupImportCommand(sourcePath: string): Promise<void> {
+  configurePrivateProcessPermissions();
   const source = path.resolve(sourcePath);
   if (!existsSync(source)) throw new Error(`Backup path does not exist: ${source}`);
   await assertRuntimeStopped();
@@ -68,8 +71,10 @@ export async function backupImportCommand(sourcePath: string): Promise<void> {
       await cp(bundledDb, stagedDb);
       validateSqliteBackup(stagedDb);
     }
-    await mkdir(home, { recursive: true });
-    await mkdir(rollback, { recursive: true });
+    await hardenPrivateTree(stagedData);
+    if (existsSync(stagedDb)) await hardenPrivateTree(stagedDb);
+    await ensurePrivateDirectory(home);
+    await ensurePrivateDirectory(rollback);
 
     const currentFiles = [
       attentionDataDir(),
@@ -87,6 +92,7 @@ export async function backupImportCommand(sourcePath: string): Promise<void> {
       }
       await rename(stagedData, attentionDataDir());
       if (existsSync(stagedDb)) await rename(stagedDb, attentionDbPath());
+      await hardenPrivateTree(home);
     } catch (error) {
       await rm(attentionDataDir(), { recursive: true, force: true });
       await removeSqliteFiles();

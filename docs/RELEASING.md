@@ -57,6 +57,13 @@ Compatibility rules:
 7. Review the draft GitHub Release, attached archives, and checksums.
 8. Publish the release when the artifacts look correct.
 
+Personal fork prereleases use a fork-specific SemVer identifier such as
+`0.3.0-keeling.1`. Promote and tag them from the deployable `life-control-plane` branch, not the
+upstream-aligned `main`, after testing a restored copy of the live runtime. Keep the prior
+package/data pair, export the migrated runtime before a rollback rehearsal, and restore compatible
+binary/data pairs together. See
+`docs/PERSONAL_FORK.md` for deliberate upstream intake and contribution extraction.
+
 ## Artifacts
 
 Release archives are named:
@@ -69,14 +76,29 @@ tend-<version>-<platform>-<arch>.tar.gz.sha256
 Each archive contains:
 
 - `tend` executable
+- `tend-imessage-helper` least-privilege read-only executable
 - bundled `dist/` UI assets
 - `README.md`
 - `MANUAL.md`
 - `CONTRIBUTING.md`
 - `LICENSE`
 - install, agent, data, security, and releasing docs
+- personal-fork maintenance policy
 - runbook and capability map
 - `manifest.json`
+
+On macOS, `pnpm tend:build` replaces Bun's linker signature with valid ad-hoc signatures using
+stable identifiers for both executables. `pnpm tend:package` verifies both signatures and fails
+closed before creating an archive if either binary was modified after signing. Ad-hoc signing does
+not establish a trusted developer identity. The build keeps a mode-`0700`, content-keyed helper cache
+under the fixed `~/.cache/tend/imessage-helper` path; the key covers the exact helper sources, Bun
+version, platform, architecture, TypeScript build configuration, compiler mode, and signing
+identity. The path has no environment override. When those inputs are unchanged, the next local
+prerelease reuses and re-verifies the same signed helper bytes. After a path-specific denial or
+silent timeout, Tend can therefore
+reuse an already-authorized prior package path only when that helper is byte-identical to the current
+packaged helper. Changed helper source or build-runtime inputs deliberately produce a new cache key
+and may require Full Disk Access to be granted again.
 
 ## Automation
 

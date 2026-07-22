@@ -33,12 +33,383 @@ export type BlockType =
   | "chart"
   | "receipt";
 
+export type SourceProvider =
+  | "gmail"
+  | "outlook_email"
+  | "google_calendar"
+  | "outlook_calendar"
+  | "slack"
+  | "teams"
+  | "granola"
+  | "imessage"
+  | "custom";
+
+export interface SourceIdentity {
+  account?: string;
+  tenant?: string;
+  workspace?: string;
+  calendar?: string;
+  device?: string;
+}
+
+export type SourceOnboardingState = "authorization_required" | "connected" | "paused" | "disconnected";
+export type SourceActionCapability = "read" | "prepare_reply" | "send_reply" | "write";
+export type ConnectorAssurance = "trusted_adapter" | "agent_host_observed" | "prepare_only";
+
+export interface ActionExecutionPolicy {
+  provider: SourceProvider;
+  operation: "send_reply" | "write";
+  sourceId?: string;
+  expectedIdentity?: SourceIdentity;
+  minimumAssurance?: Exclude<ConnectorAssurance, "prepare_only">;
+}
+
+export interface ConnectorExecutionRequirement {
+  provider: SourceProvider;
+  operation: ActionExecutionPolicy["operation"];
+  sourceId?: string;
+  expectedIdentity: SourceIdentity;
+  minimumAssurance: ConnectorAssurance;
+}
+
+export interface ConnectorExecutionGrant extends ConnectorExecutionRequirement {
+  nonce: string;
+  issuedAt: string;
+}
+
+export interface ConnectorVerificationObservation {
+  provider: SourceProvider;
+  operation: ActionExecutionPolicy["operation"];
+  observedIdentity: SourceIdentity;
+  assurance: Exclude<ConnectorAssurance, "prepare_only">;
+  observedAt: string;
+  nonce: string;
+  adapterReceipt?: string;
+}
+
+export interface ConnectorVerificationReceipt extends ConnectorExecutionRequirement {
+  observedIdentity: SourceIdentity;
+  assurance: Exclude<ConnectorAssurance, "prepare_only">;
+  observedAt: string;
+  verifiedAt: string;
+  nonce: string;
+  grantDigest: string;
+  adapterReceiptDigest?: string;
+}
+
+export interface SourceProfile {
+  provider: SourceProvider;
+  expectedIdentity: SourceIdentity;
+  required: boolean;
+  cadenceMinutes: number;
+  freshnessMinutes: number;
+  lookbackDays: number;
+  onboardingState: SourceOnboardingState;
+  scopeSummary?: string;
+  actionCapabilities: SourceActionCapability[];
+}
+
 export interface SourceRecipe {
   id: string;
   name: string;
   filename: string;
   checkpointFilename: string;
   summary: string;
+  profile?: SourceProfile;
+}
+
+export type SourceAttemptOutcome =
+  | "success"
+  | "no_change"
+  | "partial"
+  | "rate_limited"
+  | "permission_denied"
+  | "identity_mismatch"
+  | "connector_unavailable"
+  | "transient_error"
+  | "authorization_required"
+  | "paused"
+  | "disconnected";
+
+export interface SourceAttemptCompleteness {
+  identityVerified: boolean;
+  scopeVerified: boolean;
+  permissionsComplete: boolean;
+  paginationComplete: boolean;
+  backfillComplete: boolean;
+  watermark?: string;
+}
+
+export interface SourceAttempt {
+  id: string;
+  feedId: FeedId;
+  sourceId: string;
+  outcome: SourceAttemptOutcome;
+  startedAt: string;
+  completedAt: string;
+  observedIdentity?: SourceIdentity;
+  completeness?: SourceAttemptCompleteness;
+  runId?: string;
+  triggerWorkId?: string;
+  checkpointAdvanced: boolean;
+  error?: { class: string; message: string };
+}
+
+export interface SourceCollectionProof {
+  outcome: "success" | "no_change";
+  observedIdentity: SourceIdentity;
+  completeness: SourceAttemptCompleteness;
+  startedAt?: string;
+}
+
+export type SourceCoverageState =
+  | "not_configured"
+  | "authorization_required"
+  | "connected_not_collected"
+  | "fresh"
+  | "partial"
+  | "stale"
+  | "rate_limited"
+  | "permission_denied"
+  | "identity_mismatch"
+  | "paused"
+  | "disconnected";
+
+export interface SourceCoverage {
+  id: string;
+  feedId: FeedId;
+  sourceId: string;
+  name: string;
+  provider: SourceProvider | null;
+  expectedIdentity: SourceIdentity | null;
+  observedIdentity: SourceIdentity | null;
+  required: boolean;
+  state: SourceCoverageState;
+  allClearEligible: boolean;
+  lastAttemptAt: string | null;
+  lastGoodAt: string | null;
+  ageMinutes: number | null;
+  remediation: string | null;
+  detail: string;
+}
+
+export interface WorkspaceCoverage {
+  asOf: string;
+  allClear: boolean;
+  requiredSources: number;
+  freshRequiredSources: number;
+  caveat: string;
+  sources: SourceCoverage[];
+}
+
+export type CommitmentExplicitness = "explicit_first_person_bounded" | "implied" | "ambiguous";
+export type CommitmentSignalKind = "email" | "calendar" | "slack" | "teams" | "meeting_note" | "message" | "custom";
+export type CommitmentLifecycle =
+  | "open"
+  | "waiting"
+  | "scheduled"
+  | "completion_pending"
+  | "fulfilled"
+  | "withdrawn"
+  | "superseded"
+  | "reopened";
+
+export interface CommitmentSignalRef {
+  id: string;
+  candidateId?: string;
+  feedId: FeedId;
+  sourceId: string;
+  sourceRunId: string;
+  snapshotId: string;
+  kind: CommitmentSignalKind;
+  observedAt: string;
+  certainty: number;
+  explicitness: CommitmentExplicitness;
+}
+
+export interface NormalizedCommitment {
+  promise: string;
+  deliverable?: string;
+  owner?: string;
+  dueAt?: string;
+}
+
+export interface CommitmentPriorityContext {
+  domain: string;
+  consequence: "low" | "medium" | "high" | "severe";
+  blocked?: boolean;
+}
+
+export interface CommitmentCandidateInput {
+  sourceId: string;
+  sourceRunId: string;
+  snapshotId: string;
+  sourceSignalKey?: string;
+  signalKind: CommitmentSignalKind;
+  deduplicationKey: string;
+  explicitness: CommitmentExplicitness;
+  certainty: number;
+  normalized: NormalizedCommitment;
+  priorityContext?: CommitmentPriorityContext;
+  judgmentPolicyVersion: string;
+  judgmentModel: string;
+  judgmentRuntime: string;
+  judgmentRecipeDigest: string;
+  sourceClass: string;
+  qualityGatePassed: boolean;
+  ownerHint: { feedId: FeedId; cardId?: string };
+}
+
+export interface CommitmentQualityGateReceipt {
+  corpusVersion: string;
+  corpusDigest: string;
+  sourceClass: string;
+  judgmentPolicyVersion: string;
+  judgmentModel: string;
+  judgmentRuntime: string;
+  recipeDigest: string;
+  evaluatorModel: string;
+  evaluatorRuntime: string;
+  privacyReviewedAt: string;
+  evaluatedCases: number;
+  explicitPromiseRecall: number;
+  autoCreatePrecision: number;
+  falseAutoMerges: number;
+  passed: boolean;
+}
+
+export interface CommitmentCandidate extends CommitmentCandidateInput {
+  id: string;
+  feedId: FeedId;
+  signal: CommitmentSignalRef;
+  qualityGate: CommitmentQualityGateReceipt;
+  status: "pending_confirmation" | "accepted" | "rejected" | "linked";
+  commitmentId?: string;
+  confirmationCard?: { feedId: FeedId; cardId: string };
+  reconciliation?: {
+    kind: "cross_feed_link" | "same_feed_match_review";
+    proposedCommitmentId: string;
+    expectedCommitmentVersion: number;
+  };
+  createdAt: string;
+  decidedAt?: string;
+}
+
+export interface WorkspaceCommitment {
+  id: string;
+  version: number;
+  deduplicationKey: string;
+  owner: { feedId: FeedId; cardId: string };
+  promise: string;
+  deliverable?: string;
+  counterparty?: string;
+  dueAt?: string;
+  certainty: number;
+  status: CommitmentLifecycle;
+  priorityContext: CommitmentPriorityContext;
+  signals: CommitmentSignalRef[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CommitmentEvent {
+  id: string;
+  commitmentId: string;
+  type: "created" | "signal_linked" | "signal_relinked" | "signal_changed" | "candidate_confirmed" | "candidate_rejected" | "completion_evidence" | "lifecycle_changed" | "split" | "owner_changed";
+  at: string;
+  detail: Record<string, unknown>;
+}
+
+export interface PriorityRuleDefinition {
+  domainOrder: string[];
+  imminentWithinMinutes: number;
+  severeConsequenceOverride: boolean;
+}
+
+export interface PriorityRuleSet {
+  id: string;
+  version: number;
+  status: "active" | "superseded";
+  rules: PriorityRuleDefinition;
+  reason: string;
+  createdAt: string;
+  approvedAt: string;
+}
+
+export interface PriorityRuleProposal {
+  id: string;
+  baseVersion: number;
+  preferredCommitmentId: string;
+  overCommitmentId: string;
+  reason: string;
+  proposedRules: PriorityRuleDefinition;
+  status: "proposed" | "approved" | "rejected";
+  createdAt: string;
+  decidedAt?: string;
+  activatedRuleSetId?: string;
+}
+
+export interface PriorityLedgerEntry {
+  id: string;
+  type: "evaluation" | "override" | "correction" | "proposal" | "approval";
+  at: string;
+  commitmentId?: string;
+  ruleVersion?: number;
+  inputDigest?: string;
+  detail: Record<string, unknown>;
+}
+
+export interface WorkspaceNowRow {
+  id: string;
+  cardRef: { feedId: FeedId; cardId: string };
+  commitmentId?: string;
+  rank: number;
+  score: number;
+  explanation: string;
+  overrideReason?: string;
+  ruleSetId: string;
+  ruleVersion: number;
+  judgmentPolicyVersion: string;
+  judgmentModel: string;
+  judgmentRuntime: string;
+  judgmentRecipeDigest: string;
+  inputDigest: string;
+  evaluatedAt: string;
+}
+
+export interface WorkspaceNowItem {
+  id: string;
+  cardRef: { feedId: FeedId; cardId: string };
+  card: Card;
+  commitment?: WorkspaceCommitment;
+  priority: {
+    rank: number;
+    score: number;
+    explanation: string;
+    overrideReason?: string;
+    ruleSetId?: string;
+    ruleVersion?: number;
+    judgmentPolicyVersion?: string;
+    judgmentModel?: string;
+    judgmentRuntime?: string;
+    judgmentRecipeDigest?: string;
+    evaluationDigest?: string;
+  };
+}
+
+export interface WorkspaceControlPlane {
+  now: {
+    asOf: string;
+    allClear: boolean;
+    message: string;
+    items: WorkspaceNowItem[];
+  };
+  coverage: WorkspaceCoverage;
+  priority: {
+    activeRules: PriorityRuleSet | null;
+    proposals: PriorityRuleProposal[];
+    ledger: PriorityLedgerEntry[];
+  };
 }
 
 export interface ThreadBinding {
@@ -159,6 +530,7 @@ export interface ProposedAction {
   artifactBlockId?: string;
   externalMutation?: boolean;
   mailboxPolicy?: "reply_from_source";
+  execution?: ActionExecutionPolicy;
 }
 
 export interface CardAction {
@@ -172,6 +544,7 @@ export interface CardAction {
   artifactBlockId?: string;
   externalMutation?: boolean;
   mailboxPolicy?: "reply_from_source";
+  execution?: ActionExecutionPolicy;
   variant?: "primary" | "secondary";
   shortcut?: string;
 }
@@ -307,6 +680,17 @@ export interface Card {
   sourceMailbox?: string;
   sourceRunIds?: string[];
   contextInfluence?: CardContextInfluence;
+  commitmentId?: string;
+  attentionPriority?: {
+    domain: string;
+    consequence: "low" | "medium" | "high" | "severe";
+    dueAt?: string;
+    certainty: number;
+    judgmentPolicyVersion: string;
+    judgmentModel: string;
+    judgmentRuntime: string;
+    judgmentRecipeDigest: string;
+  };
   blocks: CardBlock[];
   proposedAction?: ProposedAction;
   actions?: CardAction[];
@@ -386,10 +770,12 @@ export interface WorkItem {
   verifiedAt?: string;
   verifiedApprovalDigest?: string;
   verifiedMailbox?: string;
+  executionGrant?: ConnectorExecutionGrant;
+  connectorVerification?: ConnectorVerificationReceipt;
   sourceMobileCommandId?: string;
 }
 
-export type WorkItemView = Omit<WorkItem, "capabilityToken">;
+export type WorkItemView = Omit<WorkItem, "capabilityToken" | "executionGrant" | "connectorVerification">;
 
 export interface WorkClaimedByReport {
   claim: "claimed_by_other";
@@ -537,4 +923,5 @@ export interface WorkspaceView {
   agents?: WorkspaceAgentSummary;
   dictation: DictationCapability;
   proposals: RevisionProposal[];
+  coverage?: WorkspaceCoverage;
 }

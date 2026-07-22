@@ -1,6 +1,6 @@
-import { mkdir } from "node:fs/promises";
 import { attentionDataDir, attentionDbPath, attentionHome } from "../paths";
 import { LocalSqliteStore } from "../sqlite";
+import { configurePrivateProcessPermissions, ensurePrivateDirectory, hardenPrivateTree } from "../util";
 
 export function apiPort(): number {
   return Number(process.env.ATTENTION_API_PORT ?? 4332);
@@ -15,10 +15,13 @@ export function print(value: unknown): void {
 }
 
 export async function initRuntime(): Promise<LocalSqliteStore> {
-  await mkdir(attentionHome(), { recursive: true });
-  await mkdir(attentionDataDir(), { recursive: true });
+  configurePrivateProcessPermissions();
+  await ensurePrivateDirectory(attentionHome());
+  await hardenPrivateTree(attentionHome());
+  await ensurePrivateDirectory(attentionDataDir());
   const sqlite = new LocalSqliteStore();
   await sqlite.init();
+  await hardenPrivateTree(attentionHome());
   return sqlite;
 }
 

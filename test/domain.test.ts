@@ -1841,6 +1841,21 @@ describe("approval, learning, and heartbeat safety", () => {
     expect((await store.readCard("inbox", "custom-cleanup")).status).toBe("queued");
   });
 
+  test("treats repeated identical editable-block saves as one user edit", async () => {
+    const { store, domain } = await setup();
+    await domain.upsertCard("inbox", {
+      id: "idempotent-block-edit",
+      title: "Edit once.",
+      why: "Blur and action flush can overlap.",
+      blocks: [{ id: "draft", type: "editable_text", label: "Suggested reply", value: "Original", editable: true }],
+    });
+    await domain.updateBlock("inbox", "idempotent-block-edit", "draft", "Revised");
+    await domain.updateBlock("inbox", "idempotent-block-edit", "draft", "Revised");
+    const card = await store.readCard("inbox", "idempotent-block-edit");
+    expect(card.history.filter((entry) => entry.type === "user.edited_artifact")).toHaveLength(1);
+    expect((await store.readEvents("inbox")).filter((event) => event.cardId === card.id && event.type === "card.block_edited")).toHaveLength(1);
+  });
+
   test("queues default cleanup for Codex and allows a brief undo", async () => {
     const { store, domain } = await setup();
     await enableSourceCleanup(store, "inbox", "inbox-ready-to-collect");

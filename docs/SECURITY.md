@@ -6,15 +6,36 @@ Tend is local-first and binds its development server to `127.0.0.1` by default.
 
 - The local Tend app stores workflow state and evidence.
 - Codex Desktop performs connector access.
-- Gmail, GitHub, Slack, browser, and other connector credentials are not stored by Tend.
-- External mutations require approved work and immediate `verify_action` checks.
+- Gmail, Outlook, calendar, Slack, Teams, Granola, browser, and other connector credentials are not
+  stored by Tend. Granola API credentials, when needed, belong in a connector runtime or macOS
+  Keychain and never in Tend state, CLI arguments, logs, or backups.
+- External mutations require approved work and immediate `action:verify` checks. Provider-neutral
+  execution grants bind the operation to an expected identity and fresh nonce. The
+  `agent_host_observed` level explicitly trusts the agent/connector host and is not cryptographic
+  authentication; `trusted_adapter` requires a valid nonce-bound adapter receipt; `prepare_only`
+  prohibits mutation.
+- Connector verification receipts are rechecked for freshness at execution time. A receipt that
+  was current when work was prepared cannot authorize a later mutation after its freshness window.
+- Source collection is read authority only. Every configured attempt records an outcome, failed or
+  partial attempts preserve the last-good checkpoint, and browser authentication fallback is
+  prohibited.
+- Stored source-attempt errors are bounded and redact email addresses, URLs, bearer material,
+  tokens, secrets, passwords, and API keys before reaching SQLite or readable mirrors.
 
 ## Localhost
 
 The API is a local HTTP endpoint and must not be exposed on a public network. Browser mutations
 require JSON, a loopback same-origin request, and a per-process mutation token fetched by the local
-UI. These checks prevent an unrelated website from silently posting to a running Tend server;
-they are not a substitute for keeping the listener on loopback.
+UI. Aggregated workspace reads also require the local read token and reject a foreign `Origin`.
+These checks prevent an unrelated website from silently reading the control plane or posting to a
+running Tend server; they are not a substitute for keeping the listener on loopback.
+
+## Private Local State
+
+Tend sets an owner-only process umask, creates private runtime state with `0700` directories and
+`0600` files, and repairs legacy runtime modes during initialization. Backup export/import applies
+the same hardening and refuses symbolic links inside copied private state rather than following a
+path outside the private state boundary.
 
 ## Agent Lanes
 
@@ -39,6 +60,21 @@ receipts, cards, and feed-safe CLI reads omit full OCR.
 The built-in filter removes common secrets, email addresses, long account numbers, and local user
 paths. It is defense in depth, not a substitute for source restraint: publishers must include only
 short windows that support a published signal.
+
+## iMessage/SMS Helper
+
+- Full Disk Access belongs only to the optional `tend-imessage-helper`, never the main Tend server.
+- The helper opens only `~/Library/Messages/chat.db` with SQLite read-only and `query_only` controls.
+- Its CLI exposes one bounded `collect` operation, no arbitrary path/query, and no send/delete API.
+- Denial/timeout upgrade fallback is limited to prior installed package helpers whose bytes exactly
+  match the current sibling helper; changed builds and arbitrary paths are ineligible.
+- Local macOS builds cache only a strictly verified, signed helper in the fixed owner-only
+  `~/.cache/tend/imessage-helper` directory, keyed by exact helper source, Bun version, platform,
+  architecture, TypeScript build configuration, compiler mode, and signing identity. There is no
+  cache-path override. An invalid cached signature fails the build closed rather than being replaced
+  or signed implicitly.
+- A fixed parameterized query returns a minimized projection and omits attachments. Permission and
+  schema failures become explicit degraded coverage outcomes and never advance a source checkpoint.
 
 ## iPhone And Supabase
 

@@ -39,7 +39,17 @@ the user wants an immediate sweep.
   restarted runners replay any in-flight item.
 - Claim work before connector-backed execution.
 - Upsert cards only after holding the relevant claim.
-- Call `action:verify` immediately before approved external mutations. When `work:claim` returns `operatorGuidance.userAuthorization.riskConfirmation`, treat that app click as the user's risk confirmation for the named recipients while the verified digest still matches.
+- Call `action:verify` immediately before approved external mutations with the claimed execution
+  nonce and a fresh provider-neutral identity observation. `agent_host_observed` is an honest host
+  trust boundary, not cryptographic authentication; `prepare_only` prohibits mutation. When
+  `work:claim` returns `operatorGuidance.userAuthorization.riskConfirmation`, treat that app click
+  as the user's risk confirmation for the named recipients while the verified digest still matches.
+- Commitment extraction must include the exact judgment model, runtime, and recipe digest expected
+  by the bundled quality gate. Unknown provenance fails closed. Cross-feed matches create a
+  confirmation item in the current owner feed; they do not silently mutate that card.
+- Use typed completion evidence and signal-change commands when source facts change. Re-home a
+  commitment only with its current version; Tend refuses re-home while owner work is queued,
+  working, or approved-but-blocked, and it never silently moves an external mutation grant.
 - Complete, fail, block, retry, or cancel work through `tend cli`.
 - Refresh sources only after the queue is drained, unless the claimed work explicitly asks for source collection.
 - Read `context:for-feed` before a normal source collection. A fresh update may focus the feed's
@@ -75,6 +85,10 @@ Run `tend cli help` for the full command surface. Core feed-runner commands are:
 | Operation | CLI command |
 | --- | --- |
 | Read workspace | `tend cli state --feed <feed>` |
+| Read ranked cross-feed attention | `tend cli workspace:now` |
+| Read source coverage | `tend cli workspace:coverage` |
+| Read priority rules and ledger | `tend cli workspace:priority` |
+| Route chat to a Now card owner | `tend cli workspace:instruct --feed <owner-feed> --card <owner-card> --instruction <text>` |
 | Inspect feed setup | `tend cli inspect --feed <feed>` |
 | Detect Monologue | `tend cli setup:detect-monologue` |
 | Bind Chronicle publisher | `tend cli context:bind --thread <thread>` |
@@ -88,8 +102,22 @@ Run `tend cli help` for the full command surface. Core feed-runner commands are:
 | Propose heartbeat | `tend cli feed:heartbeat:propose --feed <feed> --cadence <cadence>` |
 | Record heartbeat install | `tend cli feed:heartbeat:installed --feed <feed> --automation <id>` |
 | Add source | `tend cli source:add --feed <feed> --brief <brief>` |
+| Configure exact source profile | `tend cli source:profile:set --feed <feed> --source <source> --profile-file <profile.json>` |
 | Remove source | `tend cli source:remove --feed <feed> --source <source>` |
-| Record source run | `tend cli source:record-run --feed <feed> --source <source> --snapshots <json> --judgments <json> --checkpoint <json> [--context-use-file <path>]` |
+| Record complete/no-change source run | `tend cli source:record-run --feed <feed> --source <source> --snapshots <json> --judgments <json> --checkpoint <json> --collection-proof-file <proof.json> [--context-use-file <path>]` |
+| Record failed/partial source attempt | `tend cli source:attempt:record --feed <feed> --source <source> --outcome <outcome> [--observed-identity-file <identity.json>]` |
+| Record a commitment candidate | `tend cli commitment:candidate:record --feed <feed> --candidate-file <candidate.json>` |
+| Confirm or reject a candidate | `tend cli commitment:candidate:confirm --candidate <candidate> --accept` or `--reject` |
+| Split a mistaken auto-merge | `tend cli commitment:candidate:split --candidate <candidate> --deduplication-key <new-key> --reason <text>` |
+| Relink a signal | `tend cli commitment:candidate:relink --candidate <candidate> --commitment <target> --reason <text>` |
+| Re-home a commitment owner | `tend cli commitment:rehome --commitment <commitment> --target-feed <feed> --version <expected-version> --reason <text> [--target-card <card>]` |
+| Record typed completion evidence | `tend cli commitment:completion:evidence --commitment <commitment> --source-feed <feed> --source <source> --run <run> --snapshot <snapshot> --kind <clear_completion\|ambiguous_completion\|contradiction> --summary <text>` |
+| Record an edited/deleted/retracted signal | `tend cli commitment:signal:change --candidate <candidate> --kind <edited\|deleted\|retracted\|conflict> --reason <text> [--run <run> --snapshot <snapshot>]` |
+| Transition a commitment | `tend cli commitment:transition --commitment <commitment> --status <lifecycle> --reason <text>` |
+| Materialize current priority | `tend cli priority:evaluate` |
+| Activate initial approved rules | `tend cli priority:rules:activate --rules <json> --reason <text>` |
+| Record a priority correction | `tend cli priority:correction --preferred <commitment> --over <commitment> --reason <text> --rules <json>` |
+| Approve an exact rule proposal | `tend cli priority:proposal:approve --proposal <proposal>` |
 | Record sweep batch | `tend cli sweep:record-batch --feed <feed> --runs <json-array> [--context <mind-update-id>]` |
 | Record sweep rejudgment | `tend cli sweep:rejudge --feed <feed> --feedback <id> --ordered-cards <json-array> --removed-cards <json-array>` |
 | Upsert card | `tend cli card:upsert --feed <feed> --card <json>` |
@@ -103,7 +131,7 @@ Run `tend cli help` for the full command surface. Core feed-runner commands are:
 | Release a claimed item back to the queue | `tend cli work:release --feed <feed> --work <work> --token <token> [--session <id>]` |
 | Edit queued work | `tend cli work:edit --feed <feed> --work <work> --instruction <text>` |
 | Cancel work | `tend cli work:cancel --feed <feed> --work <work>` |
-| Verify approved action | `tend cli action:verify --feed <feed> --work <work> --token <token>` |
+| Verify approved action | `tend cli action:verify --feed <feed> --work <work> --token <token> --identity-file <fresh-observation.json>` |
 | Complete work | `tend cli work:complete --feed <feed> --work <work> --token <token> --result <json>` |
 | Fail work | `tend cli work:fail --feed <feed> --work <work> --token <token> --error <text>` |
 | Block work | `tend cli work:block --feed <feed> --work <work> --token <token> --error <text>` |

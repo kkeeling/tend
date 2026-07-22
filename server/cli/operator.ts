@@ -18,6 +18,7 @@ import {
   importLegacyInboxCard,
 } from "./legacyImports";
 import { assertCliRuntimeMatchesLive } from "./runtimeGuard";
+import type { CommitmentLifecycle, SourceAttemptOutcome } from "../../shared/types";
 
 export async function runOperatorCli(rawArgs: string[]): Promise<void> {
   const root = resolveAppRoot();
@@ -60,6 +61,26 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
     switch (command) {
       case "state":
         output = await store.readWorkspace(value("feed"));
+        break;
+      case "workspace:now":
+        await domain.refreshWorkspacePriorities();
+        output = (await store.readWorkspaceControlPlane()).now;
+        break;
+      case "workspace:coverage":
+        await domain.refreshWorkspacePriorities();
+        output = (await store.readWorkspaceControlPlane()).coverage;
+        break;
+      case "workspace:priority":
+        await domain.refreshWorkspacePriorities();
+        output = (await store.readWorkspaceControlPlane()).priority;
+        break;
+      case "workspace:instruct":
+        output = await domain.queueWorkspaceInstruction({
+          cardRef: { feedId: required("feed"), cardId: required("card") },
+          instruction: required("instruction"),
+          ...(value("commitment") ? { commitmentId: value("commitment") } : {}),
+          ...(value("version") ? { expectedCommitmentVersion: Number(value("version")) } : {}),
+        });
         break;
       case "setup:detect-monologue":
         output = await domain.detectLocalMonologue();
@@ -133,6 +154,13 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
         await domain.removeSource(required("feed"), required("source"));
         output = { ok: true };
         break;
+      case "source:profile:set":
+        output = await domain.configureSourceProfile(
+          required("feed"),
+          required("source"),
+          await structured("profile"),
+        );
+        break;
       case "source:record-run":
         output = await domain.recordSourceRun(
           required("feed"),
@@ -144,7 +172,105 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
           value("context-use") || value("context-use-file")
             ? await structured("context-use")
             : undefined,
+          value("collection-proof") || value("collection-proof-file")
+            ? await structured("collection-proof")
+            : undefined,
         );
+        break;
+      case "source:attempt:record":
+        output = await domain.recordSourceAttempt(
+          required("feed"),
+          required("source"),
+          {
+            outcome: required("outcome") as Exclude<SourceAttemptOutcome, "success" | "no_change">,
+            ...(value("observed-identity") || value("observed-identity-file")
+              ? { observedIdentity: await structured("observed-identity") }
+              : {}),
+            ...(value("started-at") ? { startedAt: value("started-at") } : {}),
+            ...(value("work") ? { triggerWorkId: value("work") } : {}),
+            ...(value("error-class") || value("error") ? {
+              error: {
+                class: value("error-class") ?? "connector_error",
+                message: value("error") ?? required("outcome"),
+              },
+            } : {}),
+          },
+        );
+        break;
+      case "commitment:candidate:record":
+        output = await domain.recordCommitmentCandidate(
+          required("feed"),
+          await structured("candidate"),
+        );
+        break;
+      case "commitment:candidate:confirm": {
+        if (flag("accept") === flag("reject")) throw new Error("Choose exactly one of --accept or --reject.");
+        output = await domain.confirmCommitmentCandidate(required("candidate"), flag("accept"));
+        break;
+      }
+      case "commitment:candidate:split":
+        output = await domain.splitCommitmentCandidate(required("candidate"), {
+          deduplicationKey: required("deduplication-key"),
+          reason: required("reason"),
+          ...(value("owner-feed") ? { ownerFeedId: value("owner-feed") } : {}),
+        });
+        break;
+      case "commitment:candidate:relink":
+        output = await domain.relinkCommitmentCandidate(
+          required("candidate"),
+          required("commitment"),
+          required("reason"),
+        );
+        break;
+      case "commitment:rehome":
+        output = await domain.rehomeCommitment(required("commitment"), {
+          targetFeedId: required("target-feed"),
+          expectedVersion: Number(required("version")),
+          reason: required("reason"),
+          ...(value("target-card") ? { targetCardId: value("target-card") } : {}),
+        });
+        break;
+      case "commitment:completion:evidence":
+        output = await domain.recordCommitmentCompletionEvidence(required("commitment"), {
+          sourceFeedId: required("source-feed"),
+          sourceId: required("source"),
+          sourceRunId: required("run"),
+          snapshotId: required("snapshot"),
+          evidenceKind: required("kind") as "clear_completion" | "ambiguous_completion" | "contradiction",
+          summary: required("summary"),
+        });
+        break;
+      case "commitment:signal:change":
+        output = await domain.recordCommitmentSignalChange(required("candidate"), {
+          kind: required("kind") as "edited" | "deleted" | "retracted" | "conflict",
+          reason: required("reason"),
+          ...(value("run") ? { evidenceRunId: value("run") } : {}),
+          ...(value("snapshot") ? { evidenceSnapshotId: value("snapshot") } : {}),
+        });
+        break;
+      case "commitment:transition":
+        output = await domain.transitionCommitment(
+          required("commitment"),
+          required("status") as CommitmentLifecycle,
+          required("reason"),
+        );
+        break;
+      case "priority:rules:activate":
+        output = await domain.activateInitialPriorityRules(json(required("rules")), required("reason"));
+        break;
+      case "priority:evaluate":
+        output = await domain.refreshWorkspacePriorities(value("judgment-policy") ?? undefined);
+        break;
+      case "priority:correction":
+        output = await domain.recordPriorityCorrection({
+          preferredCommitmentId: required("preferred"),
+          overCommitmentId: required("over"),
+          reason: required("reason"),
+          proposedRules: json(required("rules")),
+        });
+        break;
+      case "priority:proposal:approve":
+        output = await domain.approvePriorityRuleProposal(required("proposal"));
         break;
       case "sweep:record-batch":
         output = await domain.recordSweepBatch(
@@ -316,7 +442,9 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
           required("feed"),
           required("work"),
           required("token"),
-          value("mailbox"),
+          value("identity") || value("identity-file")
+            ? await structured("identity")
+            : value("mailbox"),
         );
         break;
       case "work:fail":

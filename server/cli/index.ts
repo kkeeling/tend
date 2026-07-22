@@ -3,6 +3,7 @@ import { attentionHome } from "../paths";
 import { backupExportCommand, backupImportCommand } from "./backup";
 import { doctorCommand, statusCommand } from "./health";
 import { helpCommand } from "./help";
+import { imessageCollectCommand } from "./imessage";
 import { runOperatorCli } from "./operator";
 import { healthCommand, logsCommand, restartCommand, stopCommand } from "./service";
 import { setupCodexCommand } from "./setup";
@@ -40,6 +41,9 @@ export async function runTendCli(rawArgs: string[]): Promise<void> {
       break;
     case "doctor":
       await doctorCommand();
+      break;
+    case "imessage":
+      await imessageCollectCommand([subcommand, ...rest].filter((value): value is string => Boolean(value)));
       break;
     case "setup":
       if (subcommand !== "codex") throw new Error("Expected: tend setup codex [--feed <id> | --chronicle]");

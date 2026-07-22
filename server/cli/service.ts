@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { attentionDataDir, attentionHome, attentionLogDir } from "../paths";
 import { apiPort, apiUrl, print } from "./shared";
+import { configurePrivateProcessPermissions, ensurePrivateDirectory, PRIVATE_FILE_MODE } from "../util";
 
 export async function startBackgroundCommand(): Promise<void> {
   await withServiceLock(async () => {
@@ -73,8 +74,9 @@ export async function logsCommand(): Promise<void> {
 }
 
 async function launchDetached(): Promise<void> {
-  await mkdir(attentionHome(), { recursive: true });
-  await mkdir(attentionLogDir(), { recursive: true });
+  configurePrivateProcessPermissions();
+  await ensurePrivateDirectory(attentionHome());
+  await ensurePrivateDirectory(attentionLogDir());
   const foregroundCommand = [...currentCliCommand(), "start", "--foreground"];
   const proc = Bun.spawn(backgroundCommand(foregroundCommand), {
     cwd: process.cwd(),
@@ -96,7 +98,7 @@ async function launchDetached(): Promise<void> {
     home: path.resolve(attentionHome()),
     apiPort: apiPort(),
     startedAt: new Date().toISOString(),
-  }, null, 2)}\n`);
+  }, null, 2)}\n`, { mode: PRIVATE_FILE_MODE });
 }
 
 function backgroundCommand(command: string[]): string[] {
@@ -155,9 +157,10 @@ async function checkUrl(url: string): Promise<boolean> {
 }
 
 async function withServiceLock(callback: () => Promise<void>): Promise<void> {
-  await mkdir(attentionHome(), { recursive: true });
+  configurePrivateProcessPermissions();
+  await ensurePrivateDirectory(attentionHome());
   try {
-    await mkdir(lockDir());
+    await mkdir(lockDir(), { mode: 0o700 });
   } catch {
     throw new Error("Another Tend service command is already running.");
   }

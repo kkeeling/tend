@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import type {
   AgentPresence,
@@ -7,6 +7,8 @@ import type {
   AgentWakeLine,
   AppFeedback,
   Card,
+  CommitmentCandidate,
+  CommitmentEvent,
   DictationCapability,
   DrainState,
   FeedConfig,
@@ -15,9 +17,13 @@ import type {
   MindContextBinding,
   MindContextUpdate,
   PolicyRevision,
+  PriorityLedgerEntry,
+  PriorityRuleProposal,
+  PriorityRuleSet,
   RevisionProposal,
   RoutineActionGroup,
   SourceRun,
+  SourceAttempt,
   SourceRecipe,
   SweepBatch,
   SweepFeedbackTrace,
@@ -27,6 +33,10 @@ import type {
   WorkItem,
   WorkItemView,
   WorkspaceRevision,
+  WorkspaceCommitment,
+  WorkspaceControlPlane,
+  WorkspaceNowRow,
+  WorkspaceCoverage,
   WorkspaceView,
 } from "../shared/types";
 import {
@@ -42,7 +52,8 @@ import {
   setupCard,
   threadBinding,
 } from "./templates";
-import { isoNow, makeId, readJson, withMutationLock, writeJson, writeText } from "./util";
+import { appendPrivateText, digest, ensurePrivateDirectory, isoNow, makeId, readJson, withMutationLock, writeJson, writeText } from "./util";
+import { evaluateAttentionPriority, PRIORITY_RECIPE_DIGEST } from "./workflow/priority";
 import { defaultDictationCapability } from "./monologue";
 import { FileCardRepository, type CardRepository } from "./repositories/cards";
 import { FileFeedEventRepository, type FeedEventRepository } from "./repositories/feedEvents";
@@ -51,12 +62,20 @@ import { FileMobileCommandReceiptRepository, type MobileCommandReceiptRepository
 import { FileRevisionRepository, type RevisionRepository } from "./repositories/revisions";
 import { FileRoutineActionGroupRepository, type RoutineActionGroupRepository } from "./repositories/routineActionGroups";
 import { FileSourceRunRepository, type SourceRunRepository } from "./repositories/sourceRuns";
+import { FileSourceAttemptRepository, type SourceAttemptRepository } from "./repositories/sourceAttempts";
 import { FileSourceRepository, type SourceRepository } from "./repositories/sources";
 import { FileSweepRepository, type SweepRepository } from "./repositories/sweeps";
 import { FileTextDocumentRepository, type TextDocumentRepository, type TextDocumentSeed } from "./repositories/textDocuments";
 import { FileWorkItemRepository, type WorkItemRepository } from "./repositories/workItems";
 import { FileWorkspaceFeedRepository, type WorkspaceFeedRepository } from "./repositories/workspaceFeeds";
+import { FileCommitmentCandidateRepository, type CommitmentCandidateRepository } from "./repositories/commitmentCandidates";
+import { FileCommitmentEventRepository, type CommitmentEventRepository } from "./repositories/commitmentEvents";
+import { FileWorkspaceCommitmentRepository, type WorkspaceCommitmentRepository } from "./repositories/workspaceCommitments";
+import { FilePriorityRuleRepository, type PriorityRuleRepository } from "./repositories/priorityRules";
+import { FilePriorityLedgerRepository, type PriorityLedgerRepository } from "./repositories/priorityLedger";
+import { FileWorkspaceNowProjectionRepository, type WorkspaceNowProjectionRepository } from "./repositories/workspaceNowProjection";
 import type { MobileCommandReceipt } from "../shared/mobile";
+import { projectCoverage } from "./workflow/coverage";
 
 export const GLOBAL_PROMPT_NAMES = ["judge.md", "compose-card.md", "execute-work.md", "distill-policy.md", "compound.md"] as const;
 export const FEED_PROMPT_NAMES = ["judge.md", "compose-card.md"] as const;
@@ -72,7 +91,12 @@ function defaultDrainState(): DrainState {
 }
 
 export function workItemView(work: WorkItem): WorkItemView {
-  const { capabilityToken: _capabilityToken, ...view } = work;
+  const {
+    capabilityToken: _capabilityToken,
+    executionGrant: _executionGrant,
+    connectorVerification: _connectorVerification,
+    ...view
+  } = work;
   return view;
 }
 
@@ -90,40 +114,54 @@ export class AttentionStore {
   readonly dataDir: string;
   private tail = Promise.resolve();
   private readonly cards: CardRepository;
+  private readonly commitmentCandidates: CommitmentCandidateRepository;
+  private readonly commitmentEvents: CommitmentEventRepository;
   private readonly events: FeedEventRepository;
   private readonly mindContext: MindContextRepository;
   private readonly mobileCommandReceipts: MobileCommandReceiptRepository;
   private readonly revisions: RevisionRepository;
+  private readonly priorityLedger: PriorityLedgerRepository;
+  private readonly priorityRules: PriorityRuleRepository;
   private readonly routineActionGroups: RoutineActionGroupRepository;
   private readonly sourceRuns: SourceRunRepository;
+  private readonly sourceAttempts: SourceAttemptRepository;
   private readonly sources: SourceRepository;
   private readonly sweeps: SweepRepository;
   private readonly textDocuments: TextDocumentRepository;
   private readonly workItems: WorkItemRepository;
   private readonly workspaceFeeds: WorkspaceFeedRepository;
+  private readonly workspaceCommitments: WorkspaceCommitmentRepository;
+  private readonly workspaceNowProjection: WorkspaceNowProjectionRepository;
   private readonly runAtomic?: AtomicRunner;
   private readonly agentWakeSeq = new Map<AgentPresence["agent"], number>();
 
-  constructor(dataDir: string, options: { cards?: CardRepository; events?: FeedEventRepository; mindContext?: MindContextRepository; mobileCommandReceipts?: MobileCommandReceiptRepository; revisions?: RevisionRepository; routineActionGroups?: RoutineActionGroupRepository; sourceRuns?: SourceRunRepository; sources?: SourceRepository; sweeps?: SweepRepository; textDocuments?: TextDocumentRepository; workItems?: WorkItemRepository; workspaceFeeds?: WorkspaceFeedRepository; runAtomic?: AtomicRunner } = {}) {
+  constructor(dataDir: string, options: { cards?: CardRepository; commitmentCandidates?: CommitmentCandidateRepository; commitmentEvents?: CommitmentEventRepository; events?: FeedEventRepository; mindContext?: MindContextRepository; mobileCommandReceipts?: MobileCommandReceiptRepository; priorityLedger?: PriorityLedgerRepository; priorityRules?: PriorityRuleRepository; revisions?: RevisionRepository; routineActionGroups?: RoutineActionGroupRepository; sourceAttempts?: SourceAttemptRepository; sourceRuns?: SourceRunRepository; sources?: SourceRepository; sweeps?: SweepRepository; textDocuments?: TextDocumentRepository; workItems?: WorkItemRepository; workspaceCommitments?: WorkspaceCommitmentRepository; workspaceFeeds?: WorkspaceFeedRepository; workspaceNowProjection?: WorkspaceNowProjectionRepository; runAtomic?: AtomicRunner } = {}) {
     this.dataDir = dataDir;
     this.cards = options.cards ?? new FileCardRepository(this.dataDir);
+    this.commitmentCandidates = options.commitmentCandidates ?? new FileCommitmentCandidateRepository(this.dataDir);
+    this.commitmentEvents = options.commitmentEvents ?? new FileCommitmentEventRepository(this.dataDir);
     this.events = options.events ?? new FileFeedEventRepository(this.dataDir);
     this.mindContext = options.mindContext ?? new FileMindContextRepository(this.dataDir);
     this.mobileCommandReceipts = options.mobileCommandReceipts ?? new FileMobileCommandReceiptRepository(this.dataDir);
+    this.priorityLedger = options.priorityLedger ?? new FilePriorityLedgerRepository(this.dataDir);
+    this.priorityRules = options.priorityRules ?? new FilePriorityRuleRepository(this.dataDir);
     this.revisions = options.revisions ?? new FileRevisionRepository(this.dataDir);
     this.routineActionGroups = options.routineActionGroups ?? new FileRoutineActionGroupRepository(this.dataDir);
+    this.sourceAttempts = options.sourceAttempts ?? new FileSourceAttemptRepository(this.dataDir);
     this.sourceRuns = options.sourceRuns ?? new FileSourceRunRepository(this.dataDir);
     this.sources = options.sources ?? new FileSourceRepository(this.dataDir);
     this.sweeps = options.sweeps ?? new FileSweepRepository(this.dataDir);
     this.textDocuments = options.textDocuments ?? new FileTextDocumentRepository(this.dataDir);
     this.workItems = options.workItems ?? new FileWorkItemRepository(this.dataDir);
     this.workspaceFeeds = options.workspaceFeeds ?? new FileWorkspaceFeedRepository(this.path("workspace.json"));
+    this.workspaceCommitments = options.workspaceCommitments ?? new FileWorkspaceCommitmentRepository(this.dataDir);
+    this.workspaceNowProjection = options.workspaceNowProjection ?? new FileWorkspaceNowProjectionRepository(this.dataDir);
     this.runAtomic = options.runAtomic;
   }
 
   async init(): Promise<void> {
-    await mkdir(this.dataDir, { recursive: true });
-    await mkdir(this.agentPath("claude"), { recursive: true });
+    await ensurePrivateDirectory(this.dataDir);
+    await ensurePrivateDirectory(this.agentPath("claude"));
     const dictationPath = this.path("integrations/dictation.json");
     if (!existsSync(dictationPath)) await writeJson(dictationPath, defaultDictationCapability());
     await this.workspaceFeeds.init(DEFAULT_FEED_IDS);
@@ -131,15 +169,22 @@ export class AttentionStore {
     await this.textDocuments.init();
     await this.ensureTextDocumentSeeds(this.globalTextDocumentSeeds());
     await this.cards.init(feedIds);
+    await this.commitmentCandidates.init();
+    await this.commitmentEvents.init();
     await this.events.init(feedIds);
     await this.mindContext.init();
     await this.mobileCommandReceipts.init();
+    await this.priorityLedger.init();
+    await this.priorityRules.init();
     await this.revisions.init(feedIds);
     await this.routineActionGroups.init(feedIds);
+    await this.sourceAttempts.init(feedIds);
     await this.sourceRuns.init(feedIds);
     await this.sources.init(feedIds);
     await this.sweeps.init(feedIds);
     await this.workItems.init(feedIds);
+    await this.workspaceCommitments.init();
+    await this.workspaceNowProjection.init();
     await this.ensureDefaultFeed("inbox");
     await this.ensureDefaultFeed("company-attention");
     await Promise.all((await this.workspaceFeeds.listFeedIds()).map((feedId) => this.ensureFeedTextDocuments(feedId)));
@@ -167,12 +212,139 @@ export class AttentionStore {
       agents: await this.readWorkspaceAgents(),
       dictation: await this.readDictationCapability(),
       proposals: await this.readRevisionProposals(selected),
+      coverage: await this.readWorkspaceCoverage(),
+    };
+  }
+
+  async readWorkspaceCoverage(now = new Date()): Promise<WorkspaceCoverage> {
+    const feedIds = await this.workspaceFeeds.listFeedIds();
+    const records = (await Promise.all(feedIds.map(async (feedId) =>
+      (await this.sources.list(feedId)).map(({ recipe }) => ({ feedId, recipe })),
+    ))).flat();
+    const attempts = (await Promise.all(feedIds.map((feedId) => this.sourceAttempts.list(feedId)))).flat();
+    return projectCoverage(records, attempts, now);
+  }
+
+  async readWorkspaceControlPlane(now = new Date()): Promise<WorkspaceControlPlane> {
+    const coverage = await this.readWorkspaceCoverage(now);
+    const feedIds = await this.workspaceFeeds.listFeedIds();
+    const cardSets = await Promise.all(feedIds.map(async (feedId) => {
+      const config = await this.readConfig(feedId);
+      const cards = (await this.cards.list(feedId)).filter((card) =>
+        card.kind === "attention"
+        && card.status !== "done"
+        && card.readyForPass <= config.currentPass
+        && !card.sweep?.hidden,
+      );
+      return cards;
+    }));
+    const cards = cardSets.flat();
+    const commitments = await this.workspaceCommitments.list();
+    const commitmentById = new Map(commitments.map((item) => [item.id, item]));
+    const projection = await this.workspaceNowProjection.list();
+    const priorityByCard = new Map(projection.map((row) => [row.id, row]));
+    const activeRules = await this.priorityRules.active();
+    const statusScore: Record<Card["status"], number> = {
+      approved_blocked: 750,
+      working: 700,
+      queued: 650,
+      to_review_updated: 550,
+      to_review_new: 500,
+      done: 0,
+    };
+    const ranked = cards.map((card) => {
+      const id = `${card.feedId}:${card.id}`;
+      const row = priorityByCard.get(id);
+      const commitment = card.commitmentId ? commitmentById.get(card.commitmentId) : undefined;
+      const attentionEvaluation = !row && activeRules && card.attentionPriority
+        && card.attentionPriority.judgmentRecipeDigest === PRIORITY_RECIPE_DIGEST
+        ? evaluateAttentionPriority(card.attentionPriority, activeRules, now)
+        : undefined;
+      return {
+        id,
+        cardRef: { feedId: card.feedId, cardId: card.id },
+        card,
+        ...(commitment ? { commitment } : {}),
+        priority: row ? {
+          rank: row.rank,
+          score: row.score,
+          explanation: row.explanation,
+          ...(row.overrideReason ? { overrideReason: row.overrideReason } : {}),
+          ruleSetId: row.ruleSetId,
+          ruleVersion: row.ruleVersion,
+          judgmentPolicyVersion: row.judgmentPolicyVersion,
+          judgmentModel: row.judgmentModel,
+          judgmentRuntime: row.judgmentRuntime,
+          judgmentRecipeDigest: row.judgmentRecipeDigest,
+          evaluationDigest: row.inputDigest,
+        } : attentionEvaluation && activeRules && card.attentionPriority ? {
+          rank: Number.MAX_SAFE_INTEGER,
+          score: attentionEvaluation.score,
+          explanation: attentionEvaluation.explanation,
+          ...(attentionEvaluation.overrideReason ? { overrideReason: attentionEvaluation.overrideReason } : {}),
+          ruleSetId: activeRules.id,
+          ruleVersion: activeRules.version,
+          judgmentPolicyVersion: card.attentionPriority.judgmentPolicyVersion,
+          judgmentModel: card.attentionPriority.judgmentModel,
+          judgmentRuntime: card.attentionPriority.judgmentRuntime,
+          judgmentRecipeDigest: card.attentionPriority.judgmentRecipeDigest,
+          evaluationDigest: digest({ cardId: id, attentionPriority: card.attentionPriority, ruleSetId: activeRules.id, ruleVersion: activeRules.version, score: attentionEvaluation.score }),
+        } : {
+          rank: Number.MAX_SAFE_INTEGER,
+          score: statusScore[card.status],
+          explanation: `Existing ${card.status.replaceAll("_", " ")} attention card from ${card.feedId}.`,
+        },
+      };
+    }).sort((left, right) => {
+      return right.priority.score - left.priority.score
+        || left.priority.rank - right.priority.rank
+        || left.id.localeCompare(right.id);
+    }).map((item, index) => ({ ...item, priority: { ...item.priority, rank: index + 1 } }));
+
+    const allClear = ranked.length === 0 && coverage.allClear;
+    return {
+      now: {
+        asOf: now.toISOString(),
+        allClear,
+        message: ranked.length
+          ? `${ranked.length} item${ranked.length === 1 ? " needs" : "s need"} attention.`
+          : allClear
+            ? "No attention items remain, and all required sources are coverage-complete."
+            : `No attention items are visible, but Tend cannot certify an all-clear. ${coverage.caveat}`,
+        items: ranked,
+      },
+      coverage,
+      priority: {
+        activeRules,
+        proposals: await this.priorityRules.listProposals(),
+        ledger: await this.priorityLedger.list(),
+      },
     };
   }
 
   async listFeedIds(): Promise<string[]> {
     return this.workspaceFeeds.listFeedIds();
   }
+
+  async listCommitmentCandidates(): Promise<CommitmentCandidate[]> { return this.commitmentCandidates.list(); }
+  async readCommitmentCandidate(id: string): Promise<CommitmentCandidate> { return this.commitmentCandidates.get(id); }
+  async writeCommitmentCandidate(candidate: CommitmentCandidate): Promise<void> { await this.commitmentCandidates.write(candidate); }
+  async listWorkspaceCommitments(): Promise<WorkspaceCommitment[]> { return this.workspaceCommitments.list(); }
+  async readWorkspaceCommitment(id: string): Promise<WorkspaceCommitment> { return this.workspaceCommitments.get(id); }
+  async findWorkspaceCommitmentByKey(key: string): Promise<WorkspaceCommitment | null> { return this.workspaceCommitments.findByDeduplicationKey(key); }
+  async writeWorkspaceCommitment(commitment: WorkspaceCommitment, expectedVersion?: number): Promise<void> { await this.workspaceCommitments.write(commitment, expectedVersion); }
+  async listCommitmentEvents(commitmentId?: string): Promise<CommitmentEvent[]> { return this.commitmentEvents.list(commitmentId); }
+  async appendCommitmentEvent(event: CommitmentEvent): Promise<void> { await this.commitmentEvents.append(event); }
+  async listPriorityRuleSets(): Promise<PriorityRuleSet[]> { return this.priorityRules.listRuleSets(); }
+  async readActivePriorityRuleSet(): Promise<PriorityRuleSet | null> { return this.priorityRules.active(); }
+  async writePriorityRuleSet(ruleSet: PriorityRuleSet): Promise<void> { await this.priorityRules.writeRuleSet(ruleSet); }
+  async listPriorityRuleProposals(): Promise<PriorityRuleProposal[]> { return this.priorityRules.listProposals(); }
+  async readPriorityRuleProposal(id: string): Promise<PriorityRuleProposal> { return this.priorityRules.getProposal(id); }
+  async writePriorityRuleProposal(proposal: PriorityRuleProposal): Promise<void> { await this.priorityRules.writeProposal(proposal); }
+  async listPriorityLedger(): Promise<PriorityLedgerEntry[]> { return this.priorityLedger.list(); }
+  async appendPriorityLedger(entry: PriorityLedgerEntry): Promise<void> { await this.priorityLedger.append(entry); }
+  async readWorkspaceNowProjection(): Promise<WorkspaceNowRow[]> { return this.workspaceNowProjection.list(); }
+  async replaceWorkspaceNowProjection(rows: WorkspaceNowRow[]): Promise<void> { await this.workspaceNowProjection.replace(rows); }
 
   async setFeedOrder(feedIds: string[]): Promise<void> {
     const current = await this.workspaceFeeds.listFeedIds();
@@ -409,15 +581,15 @@ export class AttentionStore {
 
   async writeAgentPresence(agent: AgentPresence["agent"], presence: AgentPresence): Promise<void> {
     if (presence.agent !== agent) throw new Error(`Presence agent mismatch: ${presence.agent}`);
-    await mkdir(this.agentPath(agent), { recursive: true });
+    await ensurePrivateDirectory(this.agentPath(agent));
     await writeJson(this.agentPath(agent, "presence.json"), presence);
     // The monitor fails closed until the ledger exists; presence arms that readable path.
-    await appendFile(this.agentPath(agent, "wake.jsonl"), "", "utf8");
+    await appendPrivateText(this.agentPath(agent, "wake.jsonl"), "");
   }
 
   async appendAgentWake(agent: AgentPresence["agent"], line: Omit<AgentWakeLine, "seq">): Promise<AgentWakeLine> {
     return this.withAgentWakeLock(async () => {
-      await mkdir(this.agentPath(agent), { recursive: true });
+      await ensurePrivateDirectory(this.agentPath(agent));
       await this.rotateAgentWakeIfNeeded(agent);
       const nextSeq = (this.agentWakeSeq.get(agent) ?? await this.scanAgentWakeSeq(agent)) + 1;
       this.agentWakeSeq.set(agent, nextSeq);
@@ -425,7 +597,7 @@ export class AttentionStore {
       const serialized = JSON.stringify(full);
       // JSON escaping should already guarantee this; keep the guard because monitors consume physical lines.
       if (serialized.includes("\n") || serialized.includes("\r")) throw new Error("Agent wake lines must serialize to one physical line.");
-      await appendFile(this.agentPath(agent, "wake.jsonl"), `${serialized}\n`, "utf8");
+      await appendPrivateText(this.agentPath(agent, "wake.jsonl"), `${serialized}\n`);
       return full;
     });
   }
@@ -564,6 +736,14 @@ export class AttentionStore {
     await this.appendEvent({ feedId, type: "source.recipe_edited", detail: { sourceId } });
   }
 
+  async writeSourceProfile(feedId: string, sourceId: string, profile: SourceRecipe["profile"]): Promise<SourceRecipe> {
+    const record = await this.sources.get(feedId, sourceId);
+    const recipe = { ...record.recipe, profile };
+    await this.sources.write(feedId, recipe, record.content, record.checkpoint);
+    await this.appendEvent({ feedId, type: "source.profile_updated", detail: { sourceId, provider: profile?.provider, onboardingState: profile?.onboardingState } });
+    return recipe;
+  }
+
   async readSourceContent(feedId: string, sourceId: string): Promise<string> {
     return (await this.sources.get(feedId, sourceId)).content;
   }
@@ -584,6 +764,14 @@ export class AttentionStore {
 
   async writeRun(run: SourceRun): Promise<void> {
     await this.sourceRuns.write(run);
+  }
+
+  async appendSourceAttempt(attempt: SourceAttempt): Promise<void> {
+    await this.sourceAttempts.append(attempt);
+  }
+
+  async listSourceAttempts(feedId: string, sourceId?: string): Promise<SourceAttempt[]> {
+    return this.sourceAttempts.list(feedId, sourceId);
   }
 
   async readRun(feedId: string, runId: string): Promise<SourceRun> {
@@ -617,7 +805,7 @@ export class AttentionStore {
       if (!feedIds.includes(feedId)) throw new Error(`Feed not found: ${feedId}`);
       await this.appendEvent({ feedId, type: "feed.archived" });
       await this.workspaceFeeds.removeFeedId(feedId);
-      await mkdir(this.path("archived-feeds"), { recursive: true });
+      await ensurePrivateDirectory(this.path("archived-feeds"));
       await rename(this.feedPath(feedId), this.path("archived-feeds", `${feedId}-${Date.now()}`));
     });
   }

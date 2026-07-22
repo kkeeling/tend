@@ -3,10 +3,12 @@ import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { CLI_CONTRACT_VERSION } from "../server/version";
+import { verifyReleaseBinarySignatures } from "./binary-signing";
 
 const root = process.cwd();
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")) as { name: string; version: string };
 const binaryPath = path.resolve(process.env.TEND_BINARY ?? path.join("dist-bin", "tend"));
+const imessageHelperPath = path.resolve(process.env.TEND_IMESSAGE_HELPER_BINARY ?? path.join("dist-bin", "tend-imessage-helper"));
 const clientDir = path.resolve(process.env.ATTENTION_CLIENT_DIR ?? "dist");
 const platform = process.env.ATTENTION_PACKAGE_PLATFORM ?? process.platform;
 const arch = process.env.ATTENTION_PACKAGE_ARCH ?? process.arch;
@@ -20,13 +22,29 @@ const checksumPath = `${archivePath}.sha256`;
 if (!existsSync(binaryPath)) {
   throw new Error(`Compiled binary not found: ${binaryPath}. Run pnpm tend:build first.`);
 }
+if (!existsSync(imessageHelperPath)) {
+  throw new Error(`Compiled iMessage helper not found: ${imessageHelperPath}. Run pnpm tend:build first.`);
+}
 if (!existsSync(path.join(clientDir, "index.html"))) {
   throw new Error(`Built UI assets not found: ${clientDir}. Run pnpm build first.`);
 }
+if (platform !== process.platform || arch !== process.arch) {
+  throw new Error(`Package labels must match the build host (${process.platform}-${process.arch}); received ${platform}-${arch}.`);
+}
+
+await verifyReleaseBinarySignatures({
+  tend: binaryPath,
+  imessageHelper: imessageHelperPath,
+}, process.platform);
 
 await rm(stageRoot, { recursive: true, force: true });
 await mkdir(stageDir, { recursive: true });
 await cp(binaryPath, path.join(stageDir, "tend"));
+await cp(imessageHelperPath, path.join(stageDir, "tend-imessage-helper"));
+await verifyReleaseBinarySignatures({
+  tend: path.join(stageDir, "tend"),
+  imessageHelper: path.join(stageDir, "tend-imessage-helper"),
+}, process.platform);
 await cp(clientDir, path.join(stageDir, "dist"), { recursive: true });
 await cp(path.join(root, "README.md"), path.join(stageDir, "README.md"));
 await cp(path.join(root, "CONTRIBUTING.md"), path.join(stageDir, "CONTRIBUTING.md"));
@@ -42,6 +60,7 @@ await copyDocs([
   "docs/IOS.md",
   "docs/SECURITY.md",
   "docs/RELEASING.md",
+  "docs/PERSONAL_FORK.md",
   "CHANGELOG.md",
   "RUNBOOK.md",
   "CAPABILITY_MAP.md",
@@ -53,6 +72,7 @@ await writeFile(path.join(stageDir, "manifest.json"), JSON.stringify({
   platform,
   arch,
   binary: "tend",
+  imessageHelper: "tend-imessage-helper",
   uiAssets: "dist",
   createdAt: new Date().toISOString(),
 }, null, 2));

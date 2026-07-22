@@ -1,4 +1,3 @@
-import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { attentionDataDir, attentionDbPath, attentionHome } from "./paths";
 import { FileCardRepository, MirroredCardRepository } from "./repositories/cards";
@@ -9,13 +8,21 @@ import { MirrorWriteCoordinator } from "./repositories/mirrorWrites";
 import { FileRevisionRepository, MirroredRevisionRepository } from "./repositories/revisions";
 import { FileRoutineActionGroupRepository, MirroredRoutineActionGroupRepository } from "./repositories/routineActionGroups";
 import { FileSourceRunRepository, MirroredSourceRunRepository } from "./repositories/sourceRuns";
+import { FileSourceAttemptRepository, MirroredSourceAttemptRepository } from "./repositories/sourceAttempts";
 import { FileSourceRepository, MirroredSourceRepository } from "./repositories/sources";
 import { FileSweepRepository, MirroredSweepRepository } from "./repositories/sweeps";
 import { FileTextDocumentRepository, MirroredTextDocumentRepository } from "./repositories/textDocuments";
 import { FileWorkItemRepository, MirroredWorkItemRepository } from "./repositories/workItems";
 import { FileWorkspaceFeedRepository, MirroredWorkspaceFeedRepository } from "./repositories/workspaceFeeds";
+import { FileCommitmentCandidateRepository, MirroredCommitmentCandidateRepository } from "./repositories/commitmentCandidates";
+import { FileCommitmentEventRepository, MirroredCommitmentEventRepository } from "./repositories/commitmentEvents";
+import { FileWorkspaceCommitmentRepository, MirroredWorkspaceCommitmentRepository } from "./repositories/workspaceCommitments";
+import { FilePriorityRuleRepository, MirroredPriorityRuleRepository } from "./repositories/priorityRules";
+import { FilePriorityLedgerRepository, MirroredPriorityLedgerRepository } from "./repositories/priorityLedger";
+import { FileWorkspaceNowProjectionRepository, MirroredWorkspaceNowProjectionRepository } from "./repositories/workspaceNowProjection";
 import { LocalSqliteStore } from "./sqlite";
 import { AttentionStore } from "./store";
+import { configurePrivateProcessPermissions, ensurePrivateDirectory, hardenPrivateTree } from "./util";
 
 export function resolveRuntimeRoot(_appRoot?: string): string {
   return attentionHome();
@@ -37,7 +44,15 @@ export async function createLocalRuntime(
   dataDir = resolveDataDir(),
   dbPath = path.join(path.dirname(dataDir), "attention.db"),
 ): Promise<{ dataDir: string; sqlite: LocalSqliteStore; store: AttentionStore }> {
-  await mkdir(dataDir, { recursive: true });
+  configurePrivateProcessPermissions();
+  const runtimeRoot = path.dirname(dataDir);
+  const ownsRuntimeRoot = path.resolve(runtimeRoot) === path.resolve(attentionHome());
+  if (ownsRuntimeRoot) {
+    await ensurePrivateDirectory(runtimeRoot);
+    await hardenPrivateTree(runtimeRoot);
+  }
+  await ensurePrivateDirectory(dataDir);
+  await hardenPrivateTree(ownsRuntimeRoot ? runtimeRoot : dataDir);
   const sqlite = new LocalSqliteStore(dbPath);
   await sqlite.init();
   const mirrorWrites = new MirrorWriteCoordinator();
@@ -45,6 +60,24 @@ export async function createLocalRuntime(
     sqlite.workspaceFeeds(),
     new FileWorkspaceFeedRepository(path.join(dataDir, "workspace.json")),
   );
+  const commitmentCandidates = new MirroredCommitmentCandidateRepository(
+    sqlite.commitmentCandidates(),
+    new FileCommitmentCandidateRepository(dataDir),
+    mirrorWrites,
+  );
+  const commitmentEvents = new MirroredCommitmentEventRepository(
+    sqlite.commitmentEvents(),
+    new FileCommitmentEventRepository(dataDir),
+    mirrorWrites,
+  );
+  const workspaceCommitments = new MirroredWorkspaceCommitmentRepository(
+    sqlite.workspaceCommitments(),
+    new FileWorkspaceCommitmentRepository(dataDir),
+    mirrorWrites,
+  );
+  const priorityRules = new MirroredPriorityRuleRepository(sqlite.priorityRules(), new FilePriorityRuleRepository(dataDir), mirrorWrites);
+  const priorityLedger = new MirroredPriorityLedgerRepository(sqlite.priorityLedger(), new FilePriorityLedgerRepository(dataDir), mirrorWrites);
+  const workspaceNowProjection = new MirroredWorkspaceNowProjectionRepository(sqlite.workspaceNowProjection(), new FileWorkspaceNowProjectionRepository(dataDir), mirrorWrites);
   const events = new MirroredFeedEventRepository(
     sqlite.feedEvents(),
     new FileFeedEventRepository(dataDir),
@@ -81,10 +114,17 @@ export async function createLocalRuntime(
   const sourceRuns = new MirroredSourceRunRepository(
     sqlite.sourceRuns(),
     new FileSourceRunRepository(dataDir),
+    mirrorWrites,
+  );
+  const sourceAttempts = new MirroredSourceAttemptRepository(
+    sqlite.sourceAttempts(),
+    new FileSourceAttemptRepository(dataDir),
+    mirrorWrites,
   );
   const sources = new MirroredSourceRepository(
     sqlite.sources(),
     new FileSourceRepository(dataDir),
+    mirrorWrites,
   );
   const sweeps = new MirroredSweepRepository(
     sqlite.sweeps(),
@@ -97,19 +137,27 @@ export async function createLocalRuntime(
   );
   const store = new AttentionStore(dataDir, {
     cards,
+    commitmentCandidates,
+    commitmentEvents,
     events,
     mindContext,
     mobileCommandReceipts,
     revisions,
+    priorityLedger,
+    priorityRules,
     routineActionGroups,
     runAtomic: (callback) => mirrorWrites.transaction(() => sqlite.transaction(callback)),
+    sourceAttempts,
     sourceRuns,
     sources,
     sweeps,
     textDocuments,
     workItems,
+    workspaceCommitments,
     workspaceFeeds,
+    workspaceNowProjection,
   });
   await store.init();
+  await hardenPrivateTree(ownsRuntimeRoot ? runtimeRoot : dataDir);
   return { dataDir, sqlite, store };
 }

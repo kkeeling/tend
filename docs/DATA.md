@@ -24,6 +24,9 @@ ATTENTION_HOME=/path/to/attention tend start
 - `data/feeds/*/cards/*.json` mirrors feed cards for backup compatibility and readable local debugging.
 - `data/feeds/*/routine-actions/*.json` mirrors routine action groups for backup compatibility and readable local debugging.
 - `data/feeds/*/sources.json`, `data/feeds/*/sources/*.md`, and `data/feeds/*/checkpoints/*.json` mirror source recipes and checkpoints.
+- Source profiles live inside `data/feeds/*/sources.json` beside their recipes and mirror expected
+  provider identities, scope, cadence, and freshness policies. `data/feeds/*/source-attempts.jsonl`
+  mirrors immutable collection successes and failures for that feed.
 - `data/feeds/*/runs/*.json` mirrors source run records for backup compatibility and readable local debugging.
 - `data/feeds/*/sweep-state.json`, `data/feeds/*/sweeps/*.json`, and `data/feeds/*/sweep-feedback/*.json` mirror sweep state, batches, and feedback traces.
 - `data/revision-proposals/*.json`, `data/workspace-revisions/*.json`, and `data/feeds/*/policy-revisions/*.json` mirror revision records.
@@ -31,15 +34,42 @@ ATTENTION_HOME=/path/to/attention tend start
 - `data/feeds/*/work/*.json` mirrors work items for backup compatibility and readable local debugging.
 - `data/feeds/*/feed.md` stores a readable feed description. `data/feeds/*/raw/**` stores immutable raw evidence snapshots.
 - `data/agents/claude/presence.json`, `data/agents/claude/wake-state.json`, and `data/agents/claude/wake.jsonl` store Claude-lane operational state. Wake lines contain only server-controlled ids/counts and never source text, instructions, or capability tokens.
+- `data/workspace/commitment-candidates/*.json`, `data/workspace/commitments/*.json`, and
+  `data/workspace/commitment-events.jsonl` mirror classified candidates, canonical commitments,
+  minimized cross-source signal references, and reversible lifecycle/link history.
+- `data/workspace/priority/rules/*.json`, `data/workspace/priority/proposals/*.json`, and
+  `data/workspace/priority/ledger.jsonl` mirror immutable rulesets, proposals, and replayable
+  evaluations, corrections, approvals, and overrides. Exactly one ruleset has `status: active`.
 - `data/mind-context/binding.json` mirrors the one bound Chronicle publisher.
 - `data/mind-context/updates/*.json` mirrors recent privacy-filtered On Your Mind publications and
   retains older records while a card references them for provenance.
   Full filtered OCR exists only in these local records and the dedicated `/mind` detail API; it is
   omitted from publication receipts, normal feed CLI output, cards, and logs.
 
+SQLite is the authority for source profiles and attempts, source runs, commitment candidates,
+canonical commitments and events, priority rules and ledger records, and the materialized Now
+projection. Their file mirrors are readable derived artifacts: they are published only after the
+database transaction commits and are not re-imported on restart. This deliberately prevents a
+failed or rolled-back mirror write from resurrecting state. Use `tend backup export` and import the
+database snapshot for recovery; do not treat an individual mirror file as an authoritative restore.
+
 ## Connector Credentials
 
-Tend does not store Gmail, GitHub, Slack, browser, or other connector credentials. Those live in the local Codex Desktop runtime.
+Tend does not store Gmail, Outlook, calendar, GitHub, Slack, Teams, Granola, browser, or other
+connector credentials. Those live in the local connector runtime or an OS credential store.
+Expected private account, tenant, and workspace identities are runtime configuration under
+`ATTENTION_HOME`; they must not be committed to a public fork. Normal workspace reads redact
+execution grants, capabilities, raw connector receipts, and restricted evidence.
+
+## iMessage/SMS Source Boundary
+
+The optional `tend-imessage-helper` reads the fixed local Messages database directly and emits a
+minimized local projection: stable message/thread identifiers, timestamp, direction, service,
+sender/thread labels when present, and bounded text. It does not collect attachments, expose the
+database path, accept arbitrary SQL, or offer outbound operations. The main Tend server does not
+need Full Disk Access. Its exact timestamp/row watermark is accepted on the next bounded read so a
+restart neither skips nor replays messages at the boundary. Imported projections and any resulting
+raw snapshots remain normal private Tend evidence under `ATTENTION_HOME`; never commit them to Git.
 
 ## Backup
 
@@ -62,6 +92,10 @@ tend-backup/
 `attention.db` is a consistent SQLite snapshot of the runtime authority. `data/` contains readable
 file mirrors and immutable raw evidence snapshots. Export writes through a temporary staging
 directory and refuses to overwrite or delete an existing destination.
+
+Schema migrations are forward-only. Before installing a newer build, export the current runtime.
+Before rehearsing a rollback, also export the migrated runtime for forward restore; then pair the
+older binary with the pre-migration backup rather than asking it to open a newer schema.
 
 Import first copies the backup into a temporary staging directory. Tend refuses to import while
 the same runtime home is active, then swaps the staged database and data into place with rollback if

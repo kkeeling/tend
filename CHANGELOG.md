@@ -5,6 +5,14 @@ a promise of ongoing maintenance.
 
 ## Unreleased
 
+## 0.3.0-keeling.7 - 2026-07-22
+
+- Reuse a strictly verified, content-keyed signed iMessage helper across local prerelease builds
+  when its exact source and build-runtime inputs are unchanged, preserving least-privilege macOS
+  approval without relaxing the byte-identical runtime fallback.
+
+## 0.3.0-keeling.6 - 2026-07-22
+
 - Separate local card dismissal from source cleanup. `tend cli card:dismiss` now moves a reviewable
   card to `done` with no work item, approval digest, `action:verify`, or connector call, and is
   reversible with `card:return-to-review`. Explicit source cleanup moves to
@@ -15,7 +23,62 @@ a promise of ongoing maintenance.
   `dismissed`); legacy cards without it are treated as `completed`.
 - Add the local `dismiss` mobile command kind (new Supabase migration `202607130001`) mirrored
   across the shared types, mobile projection, Swift models, and iOS controls, swipes, and activity.
-- Advance the CLI contract to `0.4` with the clearer, intentionally breaking card disposition names.
+- Add owner-feed reconciliation for cross-feed signals, versioned commitment re-homing, typed
+  completion evidence, and source edit/deletion/retraction handling without losing provenance.
+- Rank urgent reply, decision, and deadline cards alongside commitments with replayable judgment
+  metadata; bind KTD15 auto-creation to a frozen, privacy-reviewed fixture and exact model/recipe.
+- Recheck connector-verification freshness immediately before an approved external mutation, and
+  require the local read token plus same-origin checks for aggregated workspace HTTP reads.
+- Keep SQLite authoritative across failed mirror writes, redact source-attempt errors, preserve the
+  exact iMessage watermark on no-change, and record no-change checkpoints honestly.
+- Package the personal-fork policy and exercise the life-control-plane CLI in native smoke tests.
+- Advance the CLI contract to `0.6` for the additive commitment evidence, signal-change, and
+  re-homing commands.
+
+## 0.3.0-keeling.5 - 2026-07-21
+
+- Keep private runtime state and exported backups owner-only (`0700` directories, `0600` files),
+  repair legacy modes during initialization, and refuse symlinks inside copied private state.
+
+## 0.3.0-keeling.4 - 2026-07-21
+
+- Retry a prior installed, byte-identical Messages helper when macOS leaves the newly versioned
+  helper path silent until timeout, while preserving the fixed read-only scope and per-attempt cleanup.
+
+## 0.3.0-keeling.3 - 2026-07-21
+
+- Preserve read-only Messages access across versioned installs by reusing only byte-identical
+  packaged helpers when macOS Full Disk Access remains attached to a prior package path.
+- Bring mobile card actions, history controls, scope controls, and control-plane navigation up to
+  explicit touch-target sizing after live responsive browser QA.
+
+## 0.3.0-keeling.2 - 2026-07-21
+
+- Re-sign macOS release executables with stable ad-hoc identifiers after Bun compilation so Full
+  Disk Access can attach to the isolated read-only iMessage helper.
+- Fail macOS packaging closed unless both the main Tend binary and iMessage helper pass strict
+  signature and identifier verification, including the exact staged copies that enter the archive.
+- Add `tend imessage collect`, a bounded packaged launchd runner that keeps Full Disk Access on the
+  sibling helper and guarantees private result-file and job cleanup.
+
+## 0.3.0-keeling.1 - 2026-07-21
+
+- Add the cross-feed `/now`, `/coverage`, and `/priority-ledger` control-plane surfaces while
+  preserving feed-owned cards, card-scoped chat, editable artifacts, and exact approval actions.
+- Add durable source profiles and attempt receipts with identity, scope, completeness, freshness,
+  and explicit degraded states so incomplete coverage cannot appear as an all-clear.
+- Add canonical commitments, reversible cross-source signal reconciliation, explicit-versus-implied
+  promise handling, lifecycle history, split/relink correction primitives, and a bundled KTD15
+  quality gate without weakening feed-local source-run provenance.
+- Add deterministic priority rules, approval-gated rule changes, and an append-only evaluation
+  ledger with human-readable explanations and replayable rule/judgment versions.
+- Generalize connector identity verification with named `trusted_adapter`,
+  `agent_host_observed`, and `prepare_only` assurance; recheck owning-card evidence during
+  `action:verify` and keep legacy Gmail approvals compatible.
+- Add a separate, bounded, read-only `tend-imessage-helper` and package it beside the main binary;
+  the helper fails closed when macOS Full Disk Access is absent, round-trips an exact timestamp/row
+  watermark, and exposes no mutation command.
+- Advance the SQLite schema to `17` and the CLI contract to `0.5`.
 
 ## 0.2.0 - 2026-07-06
 

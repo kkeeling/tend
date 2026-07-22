@@ -86,7 +86,7 @@ Before an external mutation, verify the exact current approved action or default
 before acting:
 
 ```bash
-tend cli action:verify --feed <feed-id> --work <work-id> --token <capability-token>
+tend cli action:verify --feed <feed-id> --work <work-id> --token <capability-token> --identity-file <fresh-observation.json>
 ```
 
 Repeat claim until it returns the idle handshake. An active claimed item also appears in `work:list`
@@ -344,6 +344,10 @@ tend cli revision:propose \
 ```
 
 `action:verify` is mandatory operator procedure before external connector mutation for both approved
-actions and default cleanup. The app enforces the digest again when work completes, but this
-prototype does not yet wrap connector tools in a capability-scoped executor. Do not describe direct
-connector mutation as mechanically prevented.
+actions and default cleanup. For a claimed `executionGrant`, the observation must match provider,
+operation, expected account/tenant/workspace/calendar identity, freshness, nonce, and named assurance.
+`agent_host_observed` protects against ordinary wrong-account execution inside the trusted host; it
+is not cryptographic connector authentication. `trusted_adapter` is accepted only with a verified
+nonce-bound adapter receipt, and `prepare_only` never permits mutation. The app enforces the digest
+again when work completes, but it does not wrap third-party connector tools in a capability-scoped
+executor. Do not describe direct connector mutation as mechanically prevented.

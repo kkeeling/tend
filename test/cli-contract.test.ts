@@ -26,6 +26,9 @@ describe("CLI contract", () => {
     expect(commandNames).toContain("work:complete");
     expect(commandNames).toContain("work:reconcile-approved");
     expect(commandNames).toContain("source:record-run");
+    expect(commandNames).toContain("commitment:rehome");
+    expect(commandNames).toContain("commitment:completion:evidence");
+    expect(commandNames).toContain("commitment:signal:change");
     expect(commandNames).toContain("card:upsert");
     expect(commandNames).toContain("card:dismiss");
     expect(commandNames).toContain("card:cleanup-source");

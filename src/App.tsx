@@ -5,6 +5,7 @@ import { api, post } from "./app/api";
 import { agentLabel, effectiveWorkLane } from "../shared/lanes";
 import type { AttentionScreen, Inspector, Tab, WorkspaceTab } from "./app/types";
 import { CardView } from "./feed/CardView";
+import { flushVisibleCardEdits } from "./feed/cardEdits";
 import { RoutineActionGroupView } from "./feed/RoutineActionGroupView";
 import { countFor, visibleCardActions, visibleCards, visibleFeedWork, visibleRoutineActions } from "./feed/selectors";
 import { Dock } from "./shell/Dock";
@@ -155,6 +156,7 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
   const openMind = () => {
     void navigate({ to: "/mind" });
   };
+  const openNow = () => { void navigate({ to: "/now" }); };
 
   const openWorkspace = (nextTab: WorkspaceTab = "feed") => {
     setWorkspaceFocus(null);
@@ -294,15 +296,6 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
     () => post(`/api/feeds/${work.feedId}/work/${work.id}/assignee`, { agent: "codex" }),
     "Reassigned to Codex",
   );
-  const flushVisibleCardEdits = async (card: Card) => {
-    const textareas = document.querySelectorAll<HTMLTextAreaElement>(`[data-card-id="${CSS.escape(card.id)}"] textarea[data-block-id]`);
-    await Promise.all(Array.from(textareas).map(async (textarea) => {
-      const blockId = textarea.dataset.blockId;
-      const block = card.blocks.find((item) => item.id === blockId);
-      if (!blockId || block?.type !== "editable_text" || textarea.value === (block.value ?? "")) return;
-      await post(`/api/feeds/${card.feedId}/cards/${card.id}/blocks/${blockId}`, { value: textarea.value });
-    }));
-  };
   const runCardAction = (card: Card, action: CardAction) => {
     if (!feed) return;
     void (async () => {
@@ -399,7 +392,7 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
 
   if (screen === "workspace") return withRealtime(
     <>
-      <TopBar state={state} onMind={openMind} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
+      <TopBar state={state} onNow={openNow} onMind={openMind} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
       <div className="workspace-proposals"><RevisionProposals proposals={state.proposals} onApply={applyProposal} onReject={rejectProposal} onReviewLearning={openLearningReview} /></div>
       <PromptWorkspace state={state} refreshVersion={workspaceQuery.dataUpdatedAt} tab={workspaceTab} onTab={openWorkspace} onBack={closeWorkspace} onInspector={setInspector} onSaved={showToast} onTargetFocus={(target) => { setWorkspaceFocus(target); selectDockTarget(target); }} />
       <Dock state={state} feed={feed} target={resolvedDockTarget} ladder={ladder} targetVersion={targetVersion} canRouteToClaude={canRouteDockToClaude} routeToClaude={routeDockToClaude} onRouteToClaude={setRouteDockToClaude} onTarget={selectDockTarget} onSubmit={instruct} onRecollect={recollect} />
@@ -410,7 +403,7 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
 
   if (screen === "learnings") return withRealtime(
     <>
-      <TopBar state={state} onMind={openMind} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
+      <TopBar state={state} onNow={openNow} onMind={openMind} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
       <LearningReview feed={feed} proposals={compoundProposals} onBack={closeWorkspace} onApply={applyLearningProposal} onReject={rejectLearningProposal} />
       <Dock state={state} feed={feed} target={resolvedDockTarget} ladder={ladder} targetVersion={targetVersion} canRouteToClaude={canRouteDockToClaude} routeToClaude={routeDockToClaude} onRouteToClaude={setRouteDockToClaude} onTarget={selectDockTarget} onSubmit={instruct} onRecollect={recollect} />
       <InspectorPanel value={inspector} state={state} onClose={() => setInspector(null)} onChanged={(next) => { if (next) changeFeed(next); void refresh(next); }} />
@@ -424,7 +417,7 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
   const parkedClaudeWork = tab === "queued" ? parkedClaudeWorkItems(feed, claudeLiveness) : [];
   return withRealtime(
     <>
-      <TopBar state={state} onMind={openMind} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
+      <TopBar state={state} onNow={openNow} onMind={openMind} onFeed={changeFeed} onInspector={setInspector} onWorkspace={openWorkspace} />
       <nav className="tabs">
         {(["review", "queued", "working", "done"] as Tab[]).map((item) => (
           <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>

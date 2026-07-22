@@ -10,12 +10,13 @@ import { createLocalRuntime, resolveArtifactsDir, resolveDataDir, resolveDbPath,
 import { DrainDispatcher } from "./server/dispatcher";
 import { loadMobileCloudEnvFile, mobileCloudConfigFromEnv, SupabaseMobileCloudClient } from "./server/mobile/client";
 import { MobileSyncWorker } from "./server/mobile/sync";
-import { makeToken } from "./server/util";
+import { configurePrivateProcessPermissions, makeToken } from "./server/util";
 
 declare const Bun: {
   serve(options: { port: number; hostname: string; idleTimeout: number; fetch: (...args: any[]) => any }): { stop(force?: boolean): void };
 };
 
+configurePrivateProcessPermissions();
 const root = path.dirname(fileURLToPath(import.meta.url));
 loadMobileCloudEnvFile();
 const port = Number(process.env.ATTENTION_API_PORT ?? 4332);
