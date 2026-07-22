@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { SourceRecipe } from "../../shared/types";
+import type { MirrorWriteCoordinator } from "./mirrorWrites";
 import { readJson, writeJson, writeText } from "../util";
 
 export interface SourceRecord {
@@ -92,7 +93,11 @@ export class FileSourceRepository implements SourceRepository {
 }
 
 export class MirroredSourceRepository implements SourceRepository {
-  constructor(private readonly primary: SourceRepository, private readonly mirror: SourceRepository) {}
+  constructor(
+    private readonly primary: SourceRepository,
+    private readonly mirror: SourceRepository,
+    private readonly mirrorWrites?: MirrorWriteCoordinator,
+  ) {}
 
   async init(feedIds: string[]): Promise<void> {
     await this.mirror.init(feedIds);
@@ -110,22 +115,26 @@ export class MirroredSourceRepository implements SourceRepository {
 
   async write(feedId: string, recipe: SourceRecipe, content: string, checkpoint?: unknown): Promise<void> {
     await this.primary.write(feedId, recipe, content, checkpoint);
-    await this.mirror.write(feedId, recipe, content, checkpoint);
+    if (this.mirrorWrites) await this.mirrorWrites.write(() => this.mirror.write(feedId, recipe, content, checkpoint));
+    else await this.mirror.write(feedId, recipe, content, checkpoint);
   }
 
   async remove(feedId: string, sourceId: string): Promise<void> {
     await this.primary.remove(feedId, sourceId);
-    await this.mirror.remove(feedId, sourceId);
+    if (this.mirrorWrites) await this.mirrorWrites.write(() => this.mirror.remove(feedId, sourceId));
+    else await this.mirror.remove(feedId, sourceId);
   }
 
   async writeContent(feedId: string, sourceId: string, content: string): Promise<void> {
     await this.primary.writeContent(feedId, sourceId, content);
-    await this.mirror.writeContent(feedId, sourceId, content);
+    if (this.mirrorWrites) await this.mirrorWrites.write(() => this.mirror.writeContent(feedId, sourceId, content));
+    else await this.mirror.writeContent(feedId, sourceId, content);
   }
 
   async writeCheckpoint(feedId: string, sourceId: string, checkpoint: unknown): Promise<void> {
     await this.primary.writeCheckpoint(feedId, sourceId, checkpoint);
-    await this.mirror.writeCheckpoint(feedId, sourceId, checkpoint);
+    if (this.mirrorWrites) await this.mirrorWrites.write(() => this.mirror.writeCheckpoint(feedId, sourceId, checkpoint));
+    else await this.mirror.writeCheckpoint(feedId, sourceId, checkpoint);
   }
 
   private async syncFeed(feedId: string): Promise<void> {

@@ -6,6 +6,7 @@ import { AttentionDomain } from "../server/domain";
 import { apiRoutes } from "../server/routes/api";
 import { mutationAccessError } from "../server/routes/shared";
 import { AttentionStore } from "../server/store";
+import { COMMITMENT_RECIPE_DIGEST } from "../server/workflow/commitmentQuality";
 
 const roots: string[] = [];
 
@@ -24,6 +25,7 @@ async function setup(notify: (data: unknown) => void = () => {}) {
     root,
     sqlite: { status: () => ({ ok: true }) } as any,
     store,
+    mutationToken: "test-token",
   });
   return { app, domain, store };
 }
@@ -36,11 +38,11 @@ function jsonPost(body: unknown, headers: Record<string, string> = {}): RequestI
   };
 }
 
-function mutationContext(headers: Record<string, string>) {
+function mutationContext(headers: Record<string, string>, method = "POST") {
   const normalized = new Map(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]));
   return {
     req: {
-      method: "POST",
+      method,
       header: (name: string) => normalized.get(name.toLowerCase()),
     },
     json: (value: unknown, status = 200) => Response.json(value, { status }),
@@ -62,11 +64,103 @@ describe("API routing and mutation hardening", () => {
     expect(blocked).not.toBeNull();
     if (!blocked) throw new Error("Expected a cross-origin mutation rejection.");
     expect(blocked.status).toBe(403);
-    expect(await blocked.json()).toEqual({ error: "Cross-origin mutation requests are not allowed." });
+    expect(await blocked.json()).toEqual({ error: "Cross-origin API requests are not allowed." });
 
     const allowed = await app.request("/api/agents/claude/presence", jsonPost({ sessionId: "session-local" }));
     expect(allowed.status).toBe(200);
     expect(await allowed.json()).toMatchObject({ presence: { agent: "claude", sessionId: "session-local" } });
+  });
+
+  test("rejects foreign Origin reads before aggregated workspace data is returned", async () => {
+    const { app } = await setup();
+    const blocked = mutationAccessError(mutationContext({
+      origin: "https://attacker.example",
+    }, "GET"), "local-token");
+    if (!blocked) throw new Error("Expected a cross-origin read rejection.");
+    expect(blocked.status).toBe(403);
+
+    expect(mutationAccessError(mutationContext({
+      origin: "http://127.0.0.1:5173",
+    }, "GET"), "local-token")).toBeNull();
+    expect(mutationAccessError(mutationContext({}, "GET"), "local-token")).toBeNull();
+
+    const response = await app.request("/api/workspace", {
+      headers: { origin: "https://attacker.example" },
+    });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "Cross-origin API requests are not allowed." });
+
+    const unauthenticated = await app.request("/api/workspace");
+    expect(unauthenticated.status).toBe(403);
+    const authenticated = await app.request("/api/workspace", {
+      headers: { "x-attention-read-token": "test-token" },
+    });
+    expect(authenticated.status).toBe(200);
+  });
+
+  test("keeps commitment rehome, completion evidence, and signal changes available through HTTP", async () => {
+    const { app, domain, store } = await setup();
+    await domain.createFeedFromBrief("Target Work\nOwn transferred work.", null);
+    const source = await domain.addSourceFromBrief("inbox", "Read synthetic meeting notes.");
+    const run = await domain.recordSourceRun(
+      "inbox",
+      source.id,
+      [{ id: "snapshot-1" }],
+      [],
+      { cursor: "snapshot-1" },
+    );
+    const recorded = await domain.recordCommitmentCandidate("inbox", {
+      sourceId: source.id,
+      sourceRunId: run,
+      snapshotId: "snapshot-1",
+      signalKind: "meeting_note",
+      deduplicationKey: "api-parity-commitment",
+      explicitness: "explicit_first_person_bounded",
+      certainty: 0.99,
+      normalized: { promise: "Publish the API parity proof" },
+      judgmentPolicyVersion: "commitment-v1",
+      judgmentModel: "gpt-5.6-sol",
+      judgmentRuntime: "bun-test",
+      judgmentRecipeDigest: COMMITMENT_RECIPE_DIGEST,
+      sourceClass: "meeting_notes",
+      qualityGatePassed: true,
+      ownerHint: { feedId: "inbox" },
+    });
+    const commitment = recorded.commitment!;
+
+    const completion = await app.request(
+      `/api/workspace/commitments/${commitment.id}/completion-evidence`,
+      jsonPost({
+        sourceFeedId: "inbox",
+        sourceId: source.id,
+        sourceRunId: run,
+        snapshotId: "snapshot-1",
+        evidenceKind: "clear_completion",
+        summary: "The synthetic deliverable is present.",
+      }),
+    );
+    expect(completion.status).toBe(200);
+    expect(await completion.json()).toMatchObject({ status: "fulfilled" });
+
+    const changed = await app.request(
+      `/api/workspace/commitment-candidates/${recorded.candidate.id}/signal-change`,
+      jsonPost({ kind: "retracted", reason: "The synthetic source was retracted." }),
+    );
+    expect(changed.status).toBe(200);
+    expect(await changed.json()).toMatchObject({ status: "fulfilled" });
+    expect((await store.readCard("inbox", commitment.owner.cardId)).status).toBe("to_review_updated");
+
+    const current = await store.readWorkspaceCommitment(commitment.id);
+    const rehomed = await app.request(
+      `/api/workspace/commitments/${commitment.id}/rehome`,
+      jsonPost({
+        targetFeedId: "target-work",
+        expectedVersion: current.version,
+        reason: "The target feed now owns this synthetic deliverable.",
+      }),
+    );
+    expect(rehomed.status).toBe(200);
+    expect(await rehomed.json()).toMatchObject({ owner: { feedId: "target-work" } });
   });
 
   test("validates presence agent path against the allowlist", async () => {

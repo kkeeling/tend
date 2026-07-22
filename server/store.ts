@@ -52,7 +52,8 @@ import {
   setupCard,
   threadBinding,
 } from "./templates";
-import { appendPrivateText, ensurePrivateDirectory, isoNow, makeId, readJson, withMutationLock, writeJson, writeText } from "./util";
+import { appendPrivateText, digest, ensurePrivateDirectory, isoNow, makeId, readJson, withMutationLock, writeJson, writeText } from "./util";
+import { evaluateAttentionPriority, PRIORITY_RECIPE_DIGEST } from "./workflow/priority";
 import { defaultDictationCapability } from "./monologue";
 import { FileCardRepository, type CardRepository } from "./repositories/cards";
 import { FileFeedEventRepository, type FeedEventRepository } from "./repositories/feedEvents";
@@ -242,6 +243,7 @@ export class AttentionStore {
     const commitmentById = new Map(commitments.map((item) => [item.id, item]));
     const projection = await this.workspaceNowProjection.list();
     const priorityByCard = new Map(projection.map((row) => [row.id, row]));
+    const activeRules = await this.priorityRules.active();
     const statusScore: Record<Card["status"], number> = {
       approved_blocked: 750,
       working: 700,
@@ -254,6 +256,10 @@ export class AttentionStore {
       const id = `${card.feedId}:${card.id}`;
       const row = priorityByCard.get(id);
       const commitment = card.commitmentId ? commitmentById.get(card.commitmentId) : undefined;
+      const attentionEvaluation = !row && activeRules && card.attentionPriority
+        && card.attentionPriority.judgmentRecipeDigest === PRIORITY_RECIPE_DIGEST
+        ? evaluateAttentionPriority(card.attentionPriority, activeRules, now)
+        : undefined;
       return {
         id,
         cardRef: { feedId: card.feedId, cardId: card.id },
@@ -267,7 +273,22 @@ export class AttentionStore {
           ruleSetId: row.ruleSetId,
           ruleVersion: row.ruleVersion,
           judgmentPolicyVersion: row.judgmentPolicyVersion,
+          judgmentModel: row.judgmentModel,
+          judgmentRuntime: row.judgmentRuntime,
+          judgmentRecipeDigest: row.judgmentRecipeDigest,
           evaluationDigest: row.inputDigest,
+        } : attentionEvaluation && activeRules && card.attentionPriority ? {
+          rank: Number.MAX_SAFE_INTEGER,
+          score: attentionEvaluation.score,
+          explanation: attentionEvaluation.explanation,
+          ...(attentionEvaluation.overrideReason ? { overrideReason: attentionEvaluation.overrideReason } : {}),
+          ruleSetId: activeRules.id,
+          ruleVersion: activeRules.version,
+          judgmentPolicyVersion: card.attentionPriority.judgmentPolicyVersion,
+          judgmentModel: card.attentionPriority.judgmentModel,
+          judgmentRuntime: card.attentionPriority.judgmentRuntime,
+          judgmentRecipeDigest: card.attentionPriority.judgmentRecipeDigest,
+          evaluationDigest: digest({ cardId: id, attentionPriority: card.attentionPriority, ruleSetId: activeRules.id, ruleVersion: activeRules.version, score: attentionEvaluation.score }),
         } : {
           rank: Number.MAX_SAFE_INTEGER,
           score: statusScore[card.status],
@@ -275,11 +296,8 @@ export class AttentionStore {
         },
       };
     }).sort((left, right) => {
-      const leftProjected = left.priority.rank !== Number.MAX_SAFE_INTEGER;
-      const rightProjected = right.priority.rank !== Number.MAX_SAFE_INTEGER;
-      if (leftProjected !== rightProjected) return leftProjected ? -1 : 1;
-      return left.priority.rank - right.priority.rank
-        || right.priority.score - left.priority.score
+      return right.priority.score - left.priority.score
+        || left.priority.rank - right.priority.rank
         || left.id.localeCompare(right.id);
     }).map((item, index) => ({ ...item, priority: { ...item.priority, rank: index + 1 } }));
 
@@ -297,7 +315,7 @@ export class AttentionStore {
       },
       coverage,
       priority: {
-        activeRules: await this.priorityRules.active(),
+        activeRules,
         proposals: await this.priorityRules.listProposals(),
         ledger: await this.priorityLedger.list(),
       },

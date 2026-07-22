@@ -222,6 +222,32 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
           required("reason"),
         );
         break;
+      case "commitment:rehome":
+        output = await domain.rehomeCommitment(required("commitment"), {
+          targetFeedId: required("target-feed"),
+          expectedVersion: Number(required("version")),
+          reason: required("reason"),
+          ...(value("target-card") ? { targetCardId: value("target-card") } : {}),
+        });
+        break;
+      case "commitment:completion:evidence":
+        output = await domain.recordCommitmentCompletionEvidence(required("commitment"), {
+          sourceFeedId: required("source-feed"),
+          sourceId: required("source"),
+          sourceRunId: required("run"),
+          snapshotId: required("snapshot"),
+          evidenceKind: required("kind") as "clear_completion" | "ambiguous_completion" | "contradiction",
+          summary: required("summary"),
+        });
+        break;
+      case "commitment:signal:change":
+        output = await domain.recordCommitmentSignalChange(required("candidate"), {
+          kind: required("kind") as "edited" | "deleted" | "retracted" | "conflict",
+          reason: required("reason"),
+          ...(value("run") ? { evidenceRunId: value("run") } : {}),
+          ...(value("snapshot") ? { evidenceSnapshotId: value("snapshot") } : {}),
+        });
+        break;
       case "commitment:transition":
         output = await domain.transitionCommitment(
           required("commitment"),

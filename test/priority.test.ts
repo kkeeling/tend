@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { AttentionDomain } from "../server/domain";
 import { AttentionStore } from "../server/store";
+import { COMMITMENT_RECIPE_DIGEST } from "../server/workflow/commitmentQuality";
+import { PRIORITY_RECIPE_DIGEST } from "../server/workflow/priority";
 
 const roots: string[] = [];
 const now = new Date("2026-07-21T18:00:00.000Z");
@@ -48,6 +50,9 @@ async function commitment(
     normalized: { promise, ...(context.dueAt ? { dueAt: context.dueAt } : {}) },
     priorityContext: { domain: context.domain, consequence: context.consequence },
     judgmentPolicyVersion: "commitment-v1",
+    judgmentModel: "gpt-5.6-sol",
+    judgmentRuntime: "bun-test",
+    judgmentRecipeDigest: COMMITMENT_RECIPE_DIGEST,
     sourceClass: "meeting_notes",
     qualityGatePassed: true,
     ownerHint: { feedId },
@@ -59,6 +64,36 @@ afterEach(async () => {
 });
 
 describe("priority rules and ledger", () => {
+  test("ranks an urgent non-commitment reply card in the same Now order", async () => {
+    const { store, domain, sideSource, sideRun } = await setup();
+    await commitment(domain, "side-project", sideSource.id, sideRun, "side-normal", "Review the side-project experiment", { domain: "side-project", consequence: "medium" });
+    await domain.upsertCard("primary-work", {
+      id: "urgent-reply-without-commitment",
+      title: "Reply before today's filing deadline",
+      why: "This urgent decision is actionable even though it is not a promise.",
+      blocks: [{ id: "draft", type: "editable_text", label: "Suggested reply", value: "I can confirm the filing details.", editable: true }],
+      actions: [{ id: "prepare", label: "Review reply", behavior: "queue_instruction", instruction: "Review and refine this reply.", variant: "primary" }],
+      attentionPriority: {
+        domain: "primary-work",
+        consequence: "high",
+        dueAt: "2026-07-21T18:30:00.000Z",
+        certainty: 0.99,
+        judgmentPolicyVersion: "priority-v1",
+        judgmentModel: "gpt-5.6-sol",
+        judgmentRuntime: "bun-test",
+        judgmentRecipeDigest: PRIORITY_RECIPE_DIGEST,
+      },
+    });
+
+    const nowView = (await store.readWorkspaceControlPlane(now)).now;
+    expect(nowView.items[0]).toMatchObject({
+      id: "primary-work:urgent-reply-without-commitment",
+      priority: { ruleVersion: 1, judgmentModel: "gpt-5.6-sol", judgmentRecipeDigest: PRIORITY_RECIPE_DIGEST },
+    });
+    expect(nowView.items[0].commitment).toBeUndefined();
+    expect(nowView.items[0].card.actions?.[0].label).toBe("Review reply");
+  });
+
   test("ranks primary work first when comparable and records a replayable explanation", async () => {
     const { store, domain, primarySource, sideSource, primaryRun, sideRun, rule } = await setup();
     const primary = await commitment(domain, "primary-work", primarySource.id, primaryRun, "primary", "Prepare launch brief", { domain: "primary-work", consequence: "medium" });

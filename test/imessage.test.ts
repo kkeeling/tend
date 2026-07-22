@@ -141,6 +141,23 @@ describe("dedicated read-only iMessage helper", () => {
     expect(result.scope.after).toEqual({ appleDate: sharedTimestamp, rowId: 2 });
   });
 
+  test("preserves the exact prior watermark on a healthy no-change pass", async () => {
+    const { filename } = await syntheticMessagesDatabase();
+    const prior = { appleDate: appleNanoseconds("2026-07-21T17:05:00.000Z"), rowId: 2 };
+    const result = collectIMessageReadOnly({
+      since: "2026-07-21T16:55:00.000Z",
+      after: prior,
+      limit: 10,
+    }, {
+      databasePath: filename,
+      now: new Date("2026-07-21T18:00:00.000Z"),
+    });
+
+    expect(result.messages).toEqual([]);
+    expect(result.nextWatermark).toEqual(prior);
+    expect(result.truncated).toBe(false);
+  });
+
   test("maps Full Disk Access and schema failures to honest coverage outcomes", async () => {
     expect(() => collectIMessageReadOnly({ since: new Date().toISOString() }, {
       openDatabase: () => { throw new Error("operation not permitted"); },

@@ -252,6 +252,9 @@ export interface CommitmentCandidateInput {
   normalized: NormalizedCommitment;
   priorityContext?: CommitmentPriorityContext;
   judgmentPolicyVersion: string;
+  judgmentModel: string;
+  judgmentRuntime: string;
+  judgmentRecipeDigest: string;
   sourceClass: string;
   qualityGatePassed: boolean;
   ownerHint: { feedId: FeedId; cardId?: string };
@@ -262,6 +265,12 @@ export interface CommitmentQualityGateReceipt {
   corpusDigest: string;
   sourceClass: string;
   judgmentPolicyVersion: string;
+  judgmentModel: string;
+  judgmentRuntime: string;
+  recipeDigest: string;
+  evaluatorModel: string;
+  evaluatorRuntime: string;
+  privacyReviewedAt: string;
   evaluatedCases: number;
   explicitPromiseRecall: number;
   autoCreatePrecision: number;
@@ -277,6 +286,11 @@ export interface CommitmentCandidate extends CommitmentCandidateInput {
   status: "pending_confirmation" | "accepted" | "rejected" | "linked";
   commitmentId?: string;
   confirmationCard?: { feedId: FeedId; cardId: string };
+  reconciliation?: {
+    kind: "cross_feed_link" | "same_feed_match_review";
+    proposedCommitmentId: string;
+    expectedCommitmentVersion: number;
+  };
   createdAt: string;
   decidedAt?: string;
 }
@@ -288,6 +302,7 @@ export interface WorkspaceCommitment {
   owner: { feedId: FeedId; cardId: string };
   promise: string;
   deliverable?: string;
+  counterparty?: string;
   dueAt?: string;
   certainty: number;
   status: CommitmentLifecycle;
@@ -300,7 +315,7 @@ export interface WorkspaceCommitment {
 export interface CommitmentEvent {
   id: string;
   commitmentId: string;
-  type: "created" | "signal_linked" | "signal_relinked" | "candidate_confirmed" | "candidate_rejected" | "lifecycle_changed" | "split" | "owner_changed";
+  type: "created" | "signal_linked" | "signal_relinked" | "signal_changed" | "candidate_confirmed" | "candidate_rejected" | "completion_evidence" | "lifecycle_changed" | "split" | "owner_changed";
   at: string;
   detail: Record<string, unknown>;
 }
@@ -355,6 +370,9 @@ export interface WorkspaceNowRow {
   ruleSetId: string;
   ruleVersion: number;
   judgmentPolicyVersion: string;
+  judgmentModel: string;
+  judgmentRuntime: string;
+  judgmentRecipeDigest: string;
   inputDigest: string;
   evaluatedAt: string;
 }
@@ -372,6 +390,9 @@ export interface WorkspaceNowItem {
     ruleSetId?: string;
     ruleVersion?: number;
     judgmentPolicyVersion?: string;
+    judgmentModel?: string;
+    judgmentRuntime?: string;
+    judgmentRecipeDigest?: string;
     evaluationDigest?: string;
   };
 }
@@ -660,6 +681,16 @@ export interface Card {
   sourceRunIds?: string[];
   contextInfluence?: CardContextInfluence;
   commitmentId?: string;
+  attentionPriority?: {
+    domain: string;
+    consequence: "low" | "medium" | "high" | "severe";
+    dueAt?: string;
+    certainty: number;
+    judgmentPolicyVersion: string;
+    judgmentModel: string;
+    judgmentRuntime: string;
+    judgmentRecipeDigest: string;
+  };
   blocks: CardBlock[];
   proposedAction?: ProposedAction;
   actions?: CardAction[];

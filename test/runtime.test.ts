@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -127,6 +128,101 @@ describe("runtime resolution", () => {
       ]));
     } finally {
       runtime.sqlite.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("does not publish or resurrect filesystem mirrors from a rolled-back workspace transaction", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "attention-runtime-atomic-mirror-"));
+    const dataDir = path.join(root, "data");
+    const dbPath = path.join(root, "attention.db");
+    const commitment = {
+      id: "commitment-rolled-back",
+      version: 1,
+      deduplicationKey: "rolled-back",
+      owner: { feedId: "inbox", cardId: "rolled-back-card" },
+      promise: "This commitment must not survive rollback",
+      certainty: 0.99,
+      status: "open" as const,
+      priorityContext: { domain: "inbox", consequence: "medium" as const },
+      signals: [],
+      createdAt: "2026-07-22T12:00:00.000Z",
+      updatedAt: "2026-07-22T12:00:00.000Z",
+    };
+    const first = await createLocalRuntime(dataDir, dbPath);
+    try {
+      await expect(first.store.serializeAtomic(async () => {
+        await first.store.writeWorkspaceCommitment(commitment);
+        throw new Error("interrupt after authoritative write");
+      })).rejects.toThrow("interrupt after authoritative write");
+      expect(await first.store.listWorkspaceCommitments()).toEqual([]);
+      expect(existsSync(path.join(dataDir, "workspace", "commitments", `${commitment.id}.json`))).toBe(false);
+    } finally {
+      first.sqlite.close();
+    }
+
+    const restarted = await createLocalRuntime(dataDir, dbPath);
+    try {
+      expect(await restarted.store.listWorkspaceCommitments()).toEqual([]);
+    } finally {
+      restarted.sqlite.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rolls back a source run, checkpoint, and receipt as one authoritative transaction", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "attention-runtime-source-atomic-"));
+    const dataDir = path.join(root, "data");
+    const dbPath = path.join(root, "attention.db");
+    const runtime = await createLocalRuntime(dataDir, dbPath);
+    const source = {
+      id: "atomic-source",
+      name: "Atomic source",
+      filename: "atomic-source.md",
+      checkpointFilename: "atomic-source.json",
+      summary: "Synthetic atomic source.",
+    };
+    try {
+      await runtime.store.addSource("inbox", source, "# Atomic source\n");
+      const before = await runtime.store.readSourceCheckpoint("inbox", source.id);
+      await expect(runtime.store.serializeAtomic(async () => {
+        await runtime.store.writeRun({
+          id: "run-rolled-back",
+          feedId: "inbox",
+          sourceId: source.id,
+          snapshots: 1,
+          judgments: [],
+          completedAt: "2026-07-22T12:00:00.000Z",
+        });
+        await runtime.store.writeSourceCheckpoint("inbox", source.id, { cursor: "must-not-advance" });
+        await runtime.store.appendSourceAttempt({
+          id: "attempt-rolled-back",
+          feedId: "inbox",
+          sourceId: source.id,
+          outcome: "success",
+          startedAt: "2026-07-22T11:59:00.000Z",
+          completedAt: "2026-07-22T12:00:00.000Z",
+          observedIdentity: { account: "synthetic-account" },
+          completeness: { identityVerified: true, scopeVerified: true, permissionsComplete: true, paginationComplete: true, backfillComplete: true },
+          runId: "run-rolled-back",
+          checkpointAdvanced: true,
+        });
+        throw new Error("interrupt source transaction");
+      })).rejects.toThrow("interrupt source transaction");
+      await expect(runtime.store.readRun("inbox", "run-rolled-back")).rejects.toThrow();
+      expect(await runtime.store.readSourceCheckpoint("inbox", source.id)).toEqual(before);
+      expect(await runtime.store.listSourceAttempts("inbox", source.id)).toEqual([]);
+      expect(existsSync(path.join(dataDir, "feeds", "inbox", "runs", "run-rolled-back.json"))).toBe(false);
+    } finally {
+      runtime.sqlite.close();
+    }
+
+    const restarted = await createLocalRuntime(dataDir, dbPath);
+    try {
+      await expect(restarted.store.readRun("inbox", "run-rolled-back")).rejects.toThrow();
+      expect(await restarted.store.listSourceAttempts("inbox", source.id)).toEqual([]);
+    } finally {
+      restarted.sqlite.close();
       await rm(root, { recursive: true, force: true });
     }
   });

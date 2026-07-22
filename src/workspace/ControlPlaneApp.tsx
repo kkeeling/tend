@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, post } from "../app/api";
+import { localRead, post } from "../app/api";
 import type { CardAction, WorkspaceControlPlane, WorkspaceNowItem } from "../types";
 import { RealtimeProvider } from "../state/realtime";
 import { flushVisibleCardEdits } from "../feed/cardEdits";
@@ -15,7 +15,7 @@ export function ControlPlaneApp({ surface }: { surface: "now" | "coverage" | "le
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [toast, setToast] = useState("");
   const toastTimer = useRef<number | null>(null);
-  const query = useQuery({ queryKey: ["workspace-control-plane"], queryFn: () => api<WorkspaceControlPlane>("/api/workspace") });
+  const query = useQuery({ queryKey: ["workspace-control-plane"], queryFn: () => localRead<WorkspaceControlPlane>("/api/workspace") });
   const refresh = useCallback(async () => { await queryClient.invalidateQueries({ queryKey: ["workspace-control-plane"] }); }, [queryClient]);
   const showToast = useCallback((message: string) => {
     setToast(message);

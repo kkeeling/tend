@@ -63,8 +63,8 @@ export class MirroredSourceAttemptRepository implements SourceAttemptRepository 
   ) {}
 
   async init(feedIds: string[]): Promise<void> {
-    await this.mirror.init(feedIds);
     await this.primary.init(feedIds);
+    await this.mirror.init(feedIds);
     for (const feedId of feedIds) await this.syncFeed(feedId);
   }
 
@@ -81,9 +81,7 @@ export class MirroredSourceAttemptRepository implements SourceAttemptRepository 
   private async syncFeed(feedId: string): Promise<void> {
     const primary = await this.primary.list(feedId);
     const mirror = await this.mirror.list(feedId);
-    const primaryIds = new Set(primary.map((item) => item.id));
     const mirrorIds = new Set(mirror.map((item) => item.id));
-    for (const attempt of mirror.filter((item) => !primaryIds.has(item.id))) await this.primary.append(attempt);
     for (const attempt of primary.filter((item) => !mirrorIds.has(item.id))) await this.mirror.append(attempt);
   }
 }

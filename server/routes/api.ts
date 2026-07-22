@@ -5,7 +5,7 @@ import { parseOptionalWorkAgent } from "../../shared/lanes";
 import type { PostActionCompletion, PriorityRuleDefinition, VoiceTarget } from "../../shared/types";
 import { mindContextPublicationReceipt } from "../domain";
 import { versionInfo } from "../version";
-import { body, mutation, mutationAccessError, type LocalRouteContext } from "./shared";
+import { aggregatedReadAccessError, body, mutation, mutationAccessError, type LocalRouteContext } from "./shared";
 
 export function apiRoutes(context: LocalRouteContext): Hono {
   const { artifactsDir, dataDir, domain, mobileStatus, mutationToken, notify, sqlite, store } = context;
@@ -14,6 +14,8 @@ export function apiRoutes(context: LocalRouteContext): Hono {
   app.use("/api/*", async (c, next) => {
     const error = mutationAccessError(c, mutationToken);
     if (error) return error;
+    const readError = aggregatedReadAccessError(c, mutationToken);
+    if (readError) return readError;
     await next();
   });
 
@@ -140,6 +142,35 @@ export function apiRoutes(context: LocalRouteContext): Hono {
       String(input.targetCommitmentId ?? ""),
       String(input.reason ?? ""),
     );
+  }));
+  app.post("/api/workspace/commitments/:commitment/rehome", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.rehomeCommitment(c.req.param("commitment"), {
+      targetFeedId: String(input.targetFeedId ?? ""),
+      expectedVersion: Number(input.expectedVersion),
+      reason: String(input.reason ?? ""),
+      ...(typeof input.targetCardId === "string" ? { targetCardId: input.targetCardId } : {}),
+    });
+  }));
+  app.post("/api/workspace/commitments/:commitment/completion-evidence", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.recordCommitmentCompletionEvidence(c.req.param("commitment"), {
+      sourceFeedId: String(input.sourceFeedId ?? ""),
+      sourceId: String(input.sourceId ?? ""),
+      sourceRunId: String(input.sourceRunId ?? ""),
+      snapshotId: String(input.snapshotId ?? ""),
+      evidenceKind: String(input.evidenceKind ?? "") as "clear_completion" | "ambiguous_completion" | "contradiction",
+      summary: String(input.summary ?? ""),
+    });
+  }));
+  app.post("/api/workspace/commitment-candidates/:candidate/signal-change", async (c) => mutation(c, notify, async () => {
+    const input = await body(c);
+    return domain.recordCommitmentSignalChange(c.req.param("candidate"), {
+      kind: String(input.kind ?? "") as "edited" | "deleted" | "retracted" | "conflict",
+      reason: String(input.reason ?? ""),
+      ...(typeof input.evidenceRunId === "string" ? { evidenceRunId: input.evidenceRunId } : {}),
+      ...(typeof input.evidenceSnapshotId === "string" ? { evidenceSnapshotId: input.evidenceSnapshotId } : {}),
+    });
   }));
   app.post("/api/workspace/priority/corrections", async (c) => mutation(c, notify, async () => {
     const input = await body(c);

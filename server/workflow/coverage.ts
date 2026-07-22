@@ -97,7 +97,7 @@ export function projectCoverage(
     const last = sourceAttempts.at(-1);
     const lastGood = sourceAttempts.filter((attempt) =>
       (attempt.outcome === "success" || attempt.outcome === "no_change")
-      && attempt.checkpointAdvanced
+      && (attempt.outcome === "no_change" ? !attempt.checkpointAdvanced : attempt.checkpointAdvanced)
       && Boolean(attempt.observedIdentity)
       && sourceIdentityMatches(profile?.expectedIdentity ?? {}, attempt.observedIdentity!)
       && isComplete(attempt.completeness),
@@ -113,7 +113,12 @@ export function projectCoverage(
       state = stateForOutcome(last.outcome);
       if (
         (state === "fresh")
-        && (!last.checkpointAdvanced || !last.observedIdentity || !sourceIdentityMatches(profile.expectedIdentity, last.observedIdentity) || !isComplete(last.completeness))
+        && (
+          (last.outcome === "no_change" ? last.checkpointAdvanced : !last.checkpointAdvanced)
+          || !last.observedIdentity
+          || !sourceIdentityMatches(profile.expectedIdentity, last.observedIdentity)
+          || !isComplete(last.completeness)
+        )
       ) state = "partial";
       if (state === "fresh" && lastGood) {
         const age = (now.getTime() - Date.parse(lastGood.completedAt)) / 60_000;

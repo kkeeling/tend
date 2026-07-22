@@ -22,9 +22,8 @@ export class FilePriorityLedgerRepository implements PriorityLedgerRepository {
 export class MirroredPriorityLedgerRepository implements PriorityLedgerRepository {
   constructor(private readonly primary: PriorityLedgerRepository, private readonly mirror: PriorityLedgerRepository, private readonly mirrorWrites?: MirrorWriteCoordinator) {}
   async init(): Promise<void> {
-    await this.mirror.init(); await this.primary.init(); const primary = await this.primary.list(); const mirror = await this.mirror.list();
-    const primaryIds = new Set(primary.map((item) => item.id)); const mirrorIds = new Set(mirror.map((item) => item.id));
-    for (const item of mirror.filter((entry) => !primaryIds.has(entry.id))) await this.primary.append(item);
+    await this.primary.init(); await this.mirror.init(); const primary = await this.primary.list(); const mirror = await this.mirror.list();
+    const mirrorIds = new Set(mirror.map((item) => item.id));
     for (const item of primary.filter((entry) => !mirrorIds.has(entry.id))) await this.mirror.append(item);
   }
   list(): Promise<PriorityLedgerEntry[]> { return this.primary.list(); }

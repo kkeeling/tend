@@ -231,6 +231,25 @@ describe("provider-neutral connector verification", () => {
     });
     expect(verified.connectorVerification).toMatchObject({ provider: "outlook_email", assurance: "agent_host_observed" });
 
+    const staleWork = await store.readWork("inbox", claimed.id);
+    const staleAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    staleWork.verifiedAt = staleAt;
+    staleWork.connectorVerification = {
+      ...staleWork.connectorVerification!,
+      observedAt: staleAt,
+      verifiedAt: staleAt,
+    };
+    await store.writeWork(staleWork);
+    await expect(domain.completeWork("inbox", claimed.id, claimed.capabilityToken, { response: "Sent." })).rejects.toThrow("verification is stale");
+    await domain.verifyApprovedAction("inbox", claimed.id, claimed.capabilityToken, {
+      provider: "outlook_email",
+      operation: "send_reply",
+      observedIdentity: { account: "mailbox-work-a", tenant: "tenant-a" },
+      assurance: "agent_host_observed",
+      observedAt: new Date().toISOString(),
+      nonce: grant.nonce,
+    });
+
     const secondRun = await domain.recordSourceRun("inbox", source.id, [{ id: "message-2" }], [], { cursor: "message-2" }, undefined, undefined, {
       outcome: "success",
       observedIdentity: { account: "mailbox-work-a", tenant: "tenant-a" },

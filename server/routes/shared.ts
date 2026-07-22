@@ -64,19 +64,28 @@ function redactBrowserMutationResult(value: unknown): unknown {
 }
 
 export function mutationAccessError(c: any, expectedToken: string): Response | null {
+  const origin = c.req.header("origin");
+  if (origin && !isLoopbackOrigin(origin)) {
+    return c.json({ error: "Cross-origin API requests are not allowed." }, 403);
+  }
   if (c.req.method !== "POST") return null;
   const contentType = c.req.header("content-type")?.toLowerCase() ?? "";
   if (!contentType.startsWith("application/json")) {
     return c.json({ error: "Mutation requests require application/json." }, 415);
   }
-  const origin = c.req.header("origin");
   if (!origin) return null;
-  if (origin && !isLoopbackOrigin(origin)) {
-    return c.json({ error: "Cross-origin mutation requests are not allowed." }, 403);
-  }
   const suppliedToken = c.req.header("x-attention-mutation-token") ?? "";
   if (!tokensMatch(suppliedToken, expectedToken)) {
     return c.json({ error: "A current local mutation token is required." }, 403);
+  }
+  return null;
+}
+
+export function aggregatedReadAccessError(c: any, expectedToken: string): Response | null {
+  if (c.req.method !== "GET" || !String(c.req.path ?? "").startsWith("/api/workspace")) return null;
+  const suppliedToken = c.req.header("x-attention-read-token") ?? "";
+  if (!tokensMatch(suppliedToken, expectedToken)) {
+    return c.json({ error: "A current local read token is required for aggregated workspace data." }, 403);
   }
   return null;
 }

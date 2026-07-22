@@ -100,6 +100,24 @@ describe("workspace source coverage", () => {
     expect(coverage.sources[0]).toMatchObject({ state: "fresh", lastGoodAt: expect.any(String) });
   });
 
+  test("treats a complete no-change receipt as fresh without claiming checkpoint advancement", () => {
+    const noChange = projectCoverage(
+      [{ feedId: "primary-work", recipe: source() }],
+      [attempt({ outcome: "no_change", checkpointAdvanced: false })],
+      new Date(now),
+    );
+    expect(noChange.allClear).toBe(true);
+    expect(noChange.sources[0]).toMatchObject({ state: "fresh", lastGoodAt: expect.any(String) });
+
+    const dishonest = projectCoverage(
+      [{ feedId: "primary-work", recipe: source() }],
+      [attempt({ outcome: "no_change", checkpointAdvanced: true })],
+      new Date(now),
+    );
+    expect(dishonest.allClear).toBe(false);
+    expect(dishonest.sources[0].state).toBe("partial");
+  });
+
   test("preserves the last successful boundary while exposing the latest failure", () => {
     const coverage = projectCoverage(
       [{ feedId: "primary-work", recipe: source() }],
@@ -160,7 +178,7 @@ describe("workspace source coverage", () => {
       await domain.recordSourceAttempt("inbox", "mailbox-work-a", {
         outcome: "rate_limited",
         observedIdentity: { account: "mailbox-work-a" },
-        error: { class: "rate_limited", message: "Try later." },
+        error: { class: "rate_limited", message: "Try later for private.person@example.com at https://provider.example/thread/secret?token=raw-secret bearer raw-secret." },
       });
 
       expect(await runtime.store.readSourceCheckpoint("inbox", "mailbox-work-a")).toEqual({ cursor: "good" });
@@ -168,7 +186,12 @@ describe("workspace source coverage", () => {
       expect(attempts.map((item) => item.outcome)).toEqual(["success", "rate_limited"]);
       const mirror = await readFile(path.join(root, "data", "feeds", "inbox", "source-attempts.jsonl"), "utf8");
       expect(mirror.trim().split("\n")).toHaveLength(2);
-      expect(mirror).not.toContain("Try later.\nTry later.");
+      expect(mirror).toContain("[redacted-email]");
+      expect(mirror).toContain("[redacted-url]");
+      expect(mirror).toContain("[redacted-secret]");
+      expect(mirror).not.toContain("private.person@example.com");
+      expect(mirror).not.toContain("provider.example/thread/secret");
+      expect(mirror).not.toContain("raw-secret");
 
       const beforeRestart = await runtime.store.readWorkspaceCoverage(new Date(now));
       expect(beforeRestart.sources.find((item) => item.sourceId === "mailbox-work-a")).toMatchObject({

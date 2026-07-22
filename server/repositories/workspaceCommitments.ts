@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import type { WorkspaceCommitment } from "../../shared/types";
+import type { MirrorWriteCoordinator } from "./mirrorWrites";
 import { readJson, writeJson } from "../util";
 
 export interface WorkspaceCommitmentRepository {
@@ -37,18 +38,23 @@ export class FileWorkspaceCommitmentRepository implements WorkspaceCommitmentRep
 }
 
 export class MirroredWorkspaceCommitmentRepository implements WorkspaceCommitmentRepository {
-  constructor(private readonly primary: WorkspaceCommitmentRepository, private readonly mirror: WorkspaceCommitmentRepository) {}
+  constructor(
+    private readonly primary: WorkspaceCommitmentRepository,
+    private readonly mirror: WorkspaceCommitmentRepository,
+    private readonly mirrorWrites?: MirrorWriteCoordinator,
+  ) {}
   async init(): Promise<void> {
-    await this.mirror.init(); await this.primary.init();
+    await this.primary.init(); await this.mirror.init();
     const primary = await this.primary.list(); const mirror = await this.mirror.list();
-    const primaryIds = new Set(primary.map((item) => item.id)); const mirrorIds = new Set(mirror.map((item) => item.id));
-    for (const item of mirror.filter((candidate) => !primaryIds.has(candidate.id))) await this.primary.write(item);
+    const mirrorIds = new Set(mirror.map((item) => item.id));
     for (const item of primary.filter((candidate) => !mirrorIds.has(candidate.id))) await this.mirror.write(item);
   }
   list(): Promise<WorkspaceCommitment[]> { return this.primary.list(); }
   get(id: string): Promise<WorkspaceCommitment> { return this.primary.get(id); }
   findByDeduplicationKey(key: string): Promise<WorkspaceCommitment | null> { return this.primary.findByDeduplicationKey(key); }
   async write(commitment: WorkspaceCommitment, expectedVersion?: number): Promise<void> {
-    await this.primary.write(commitment, expectedVersion); await this.mirror.write(commitment);
+    await this.primary.write(commitment, expectedVersion);
+    if (this.mirrorWrites) await this.mirrorWrites.write(() => this.mirror.write(commitment));
+    else await this.mirror.write(commitment);
   }
 }

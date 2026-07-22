@@ -63,6 +63,7 @@ export async function createLocalRuntime(
   const commitmentCandidates = new MirroredCommitmentCandidateRepository(
     sqlite.commitmentCandidates(),
     new FileCommitmentCandidateRepository(dataDir),
+    mirrorWrites,
   );
   const commitmentEvents = new MirroredCommitmentEventRepository(
     sqlite.commitmentEvents(),
@@ -72,10 +73,11 @@ export async function createLocalRuntime(
   const workspaceCommitments = new MirroredWorkspaceCommitmentRepository(
     sqlite.workspaceCommitments(),
     new FileWorkspaceCommitmentRepository(dataDir),
+    mirrorWrites,
   );
-  const priorityRules = new MirroredPriorityRuleRepository(sqlite.priorityRules(), new FilePriorityRuleRepository(dataDir));
+  const priorityRules = new MirroredPriorityRuleRepository(sqlite.priorityRules(), new FilePriorityRuleRepository(dataDir), mirrorWrites);
   const priorityLedger = new MirroredPriorityLedgerRepository(sqlite.priorityLedger(), new FilePriorityLedgerRepository(dataDir), mirrorWrites);
-  const workspaceNowProjection = new MirroredWorkspaceNowProjectionRepository(sqlite.workspaceNowProjection(), new FileWorkspaceNowProjectionRepository(dataDir));
+  const workspaceNowProjection = new MirroredWorkspaceNowProjectionRepository(sqlite.workspaceNowProjection(), new FileWorkspaceNowProjectionRepository(dataDir), mirrorWrites);
   const events = new MirroredFeedEventRepository(
     sqlite.feedEvents(),
     new FileFeedEventRepository(dataDir),
@@ -112,6 +114,7 @@ export async function createLocalRuntime(
   const sourceRuns = new MirroredSourceRunRepository(
     sqlite.sourceRuns(),
     new FileSourceRunRepository(dataDir),
+    mirrorWrites,
   );
   const sourceAttempts = new MirroredSourceAttemptRepository(
     sqlite.sourceAttempts(),
@@ -121,6 +124,7 @@ export async function createLocalRuntime(
   const sources = new MirroredSourceRepository(
     sqlite.sources(),
     new FileSourceRepository(dataDir),
+    mirrorWrites,
   );
   const sweeps = new MirroredSweepRepository(
     sqlite.sweeps(),

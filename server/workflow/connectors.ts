@@ -29,6 +29,7 @@ const PROVIDER_MINIMUM_ASSURANCE: Record<SourceProvider, ConnectorAssurance> = {
   custom: "trusted_adapter",
 };
 const SAFE_IDENTITY_KEY = /^[a-z][a-z0-9_-]{0,63}$/i;
+export const CONNECTOR_VERIFICATION_MAX_AGE_MS = 5 * 60_000;
 
 export type TrustedAdapterVerifier = (input: {
   grant: ConnectorExecutionGrant;
@@ -101,7 +102,7 @@ export function verifyConnectorObservation(
   const observedAt = new Date(observation.observedAt);
   const now = options.now ?? new Date();
   if (Number.isNaN(observedAt.getTime())) throw new Error("Connector profile observation timestamp is invalid.");
-  if (observedAt.getTime() > now.getTime() + 60_000 || now.getTime() - observedAt.getTime() > 5 * 60_000) {
+  if (observedAt.getTime() > now.getTime() + 60_000 || now.getTime() - observedAt.getTime() > CONNECTOR_VERIFICATION_MAX_AGE_MS) {
     throw new Error("Connector profile observation is not fresh; observe the connector identity again immediately before mutation.");
   }
   if (ASSURANCE_RANK[observation.assurance] < ASSURANCE_RANK[grant.minimumAssurance]) {
@@ -129,6 +130,24 @@ export function verifyConnectorObservation(
     grantDigest: executionRequirementDigest(grant),
     ...(observation.adapterReceipt ? { adapterReceiptDigest: digest(observation.adapterReceipt) } : {}),
   };
+}
+
+export function assertConnectorVerificationFresh(
+  receipt: ConnectorVerificationReceipt,
+  now = new Date(),
+): void {
+  const verifiedAt = new Date(receipt.verifiedAt);
+  const observedAt = new Date(receipt.observedAt);
+  if (
+    Number.isNaN(verifiedAt.getTime())
+    || Number.isNaN(observedAt.getTime())
+    || verifiedAt.getTime() > now.getTime() + 60_000
+    || observedAt.getTime() > now.getTime() + 60_000
+    || now.getTime() - verifiedAt.getTime() > CONNECTOR_VERIFICATION_MAX_AGE_MS
+    || now.getTime() - observedAt.getTime() > CONNECTOR_VERIFICATION_MAX_AGE_MS
+  ) {
+    throw new Error("Connector verification is stale; observe the live connector identity again immediately before mutation.");
+  }
 }
 
 export function sourceIdentityMatches(expected: SourceIdentity, observed: SourceIdentity): boolean {

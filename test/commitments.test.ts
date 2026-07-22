@@ -5,8 +5,14 @@ import path from "node:path";
 import { AttentionDomain } from "../server/domain";
 import { AttentionStore } from "../server/store";
 import { createLocalRuntime } from "../server/runtime";
+import { COMMITMENT_RECIPE_DIGEST } from "../server/workflow/commitmentQuality";
 
 const roots: string[] = [];
+const TEST_JUDGMENT = {
+  judgmentModel: "gpt-5.6-sol",
+  judgmentRuntime: "bun-test",
+  judgmentRecipeDigest: COMMITMENT_RECIPE_DIGEST,
+};
 
 async function setup() {
   const root = await mkdtemp(path.join(os.tmpdir(), "tend-commitments-"));
@@ -48,6 +54,7 @@ describe("workspace commitments", () => {
         certainty: 0.98,
         normalized,
         judgmentPolicyVersion: "commitment-v1",
+        ...TEST_JUDGMENT,
         sourceClass: "meeting_notes",
         qualityGatePassed: true,
         ownerHint: { feedId: "primary-work" },
@@ -62,19 +69,81 @@ describe("workspace commitments", () => {
         certainty: 0.96,
         normalized,
         judgmentPolicyVersion: "commitment-v1",
+        ...TEST_JUDGMENT,
         sourceClass: "email",
         qualityGatePassed: true,
         ownerHint: { feedId: "primary-work" },
       }),
     ]);
 
-    expect(fromMeeting.commitment?.id).toBe(fromEmail.commitment?.id);
-    const commitments = await store.listWorkspaceCommitments();
+    expect(fromMeeting.commitment).not.toBeNull();
+    expect(fromEmail.commitment).toBeNull();
+    expect(fromEmail.candidate).toMatchObject({
+      status: "pending_confirmation",
+      reconciliation: {
+        kind: "cross_feed_link",
+        proposedCommitmentId: fromMeeting.commitment!.id,
+        expectedCommitmentVersion: fromMeeting.commitment!.version,
+      },
+      confirmationCard: { feedId: "primary-work" },
+    });
+    let commitments = await store.listWorkspaceCommitments();
+    expect(commitments).toHaveLength(1);
+    expect(commitments[0].signals).toHaveLength(1);
+    const ownerCardBefore = await store.readCard("primary-work", commitments[0].owner.cardId);
+    expect(ownerCardBefore.blocks.find((block) => block.id === "source-receipts")).toMatchObject({ text: "1 attributable source receipt." });
+
+    const reconciled = await domain.confirmCommitmentCandidate(fromEmail.candidate.id, true);
+    expect(reconciled.commitment?.id).toBe(fromMeeting.commitment!.id);
+    commitments = await store.listWorkspaceCommitments();
     expect(commitments).toHaveLength(1);
     expect(commitments[0].signals).toHaveLength(2);
     expect(commitments[0].owner.feedId).toBe("primary-work");
     expect(await store.hasCard("primary-work", commitments[0].owner.cardId)).toBe(true);
     expect((await store.readCard("primary-work", commitments[0].owner.cardId)).sourceRunIds).toBeUndefined();
+  });
+
+  test("does not silently merge similar-but-distinct obligations that share a deduplication key", async () => {
+    const { store, domain, primarySource, primaryRun } = await setup();
+    const first = await domain.recordCommitmentCandidate("primary-work", {
+      sourceId: primarySource.id,
+      sourceRunId: primaryRun,
+      snapshotId: "snapshot-1",
+      sourceSignalKey: "launch-deck",
+      signalKind: "meeting_note",
+      deduplicationKey: "mistaken-shared-key",
+      explicitness: "explicit_first_person_bounded",
+      certainty: 0.99,
+      normalized: { promise: "Send the revised launch deck", deliverable: "Launch deck" },
+      judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
+      sourceClass: "meeting_notes",
+      qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work" },
+    });
+    const second = await domain.recordCommitmentCandidate("primary-work", {
+      sourceId: primarySource.id,
+      sourceRunId: primaryRun,
+      snapshotId: "snapshot-1",
+      sourceSignalKey: "investor-deck",
+      signalKind: "meeting_note",
+      deduplicationKey: "mistaken-shared-key",
+      explicitness: "explicit_first_person_bounded",
+      certainty: 0.99,
+      normalized: { promise: "Send the revised investor deck", deliverable: "Investor deck" },
+      judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
+      sourceClass: "meeting_notes",
+      qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work" },
+    });
+
+    expect(second.commitment).toBeNull();
+    expect(second.candidate.reconciliation?.kind).toBe("same_feed_match_review");
+    expect((await store.readWorkspaceCommitment(first.commitment!.id)).signals).toHaveLength(1);
+    const keptSeparate = await domain.confirmCommitmentCandidate(second.candidate.id, false);
+    expect(keptSeparate.commitment?.id).not.toBe(first.commitment!.id);
+    expect(await store.listWorkspaceCommitments()).toHaveLength(2);
   });
 
   test("requires confirmation for ambiguous text or a failing source-class gate", async () => {
@@ -89,6 +158,7 @@ describe("workspace commitments", () => {
       certainty: 0.62,
       normalized: { promise: "Send the metrics" },
       judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
       sourceClass: "meeting_notes",
       qualityGatePassed: true,
       ownerHint: { feedId: "primary-work" },
@@ -111,6 +181,7 @@ describe("workspace commitments", () => {
       certainty: 0.99,
       normalized: { promise: "Send the appendix" },
       judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
       sourceClass: "meeting_notes",
       qualityGatePassed: false,
       ownerHint: { feedId: "primary-work" },
@@ -128,6 +199,7 @@ describe("workspace commitments", () => {
       certainty: 0.99,
       normalized: { promise: "Send the unvalidated appendix" },
       judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
       sourceClass: "unvalidated-source",
       qualityGatePassed: true,
       ownerHint: { feedId: "primary-work" },
@@ -155,6 +227,7 @@ describe("workspace commitments", () => {
       certainty: 0.99,
       normalized: { promise: "Send the validated brief" },
       judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
       sourceClass: "meeting_notes",
       qualityGatePassed: true,
       ownerHint: { feedId: "primary-work" },
@@ -185,6 +258,7 @@ describe("workspace commitments", () => {
       certainty: 0.99,
       normalized: { promise: "Send the final brief" },
       judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
       sourceClass: "meeting_notes",
       qualityGatePassed: true,
       ownerHint: { feedId: "primary-work" },
@@ -202,6 +276,141 @@ describe("workspace commitments", () => {
       "lifecycle_changed",
       "lifecycle_changed",
     ]);
+  });
+
+  test("maps typed source evidence to completion-pending, fulfilled, and reopened states", async () => {
+    const { store, domain, primarySource, primaryRun } = await setup();
+    const recorded = await domain.recordCommitmentCandidate("primary-work", {
+      sourceId: primarySource.id,
+      sourceRunId: primaryRun,
+      snapshotId: "snapshot-1",
+      signalKind: "meeting_note",
+      deduplicationKey: "completion-evidence-flow",
+      explicitness: "explicit_first_person_bounded",
+      certainty: 0.99,
+      normalized: { promise: "Send the completion evidence brief" },
+      judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
+      sourceClass: "meeting_notes",
+      qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work" },
+    });
+    const evidence = {
+      sourceFeedId: "primary-work",
+      sourceId: primarySource.id,
+      sourceRunId: primaryRun,
+      snapshotId: "snapshot-1",
+    };
+
+    expect((await domain.recordCommitmentCompletionEvidence(recorded.commitment!.id, {
+      ...evidence,
+      evidenceKind: "ambiguous_completion",
+      summary: "The meeting suggests the brief may have been sent.",
+    })).status).toBe("completion_pending");
+    expect((await domain.recordCommitmentCompletionEvidence(recorded.commitment!.id, {
+      ...evidence,
+      evidenceKind: "clear_completion",
+      summary: "The recipient explicitly confirmed delivery.",
+    })).status).toBe("fulfilled");
+    expect((await domain.recordCommitmentCompletionEvidence(recorded.commitment!.id, {
+      ...evidence,
+      evidenceKind: "contradiction",
+      summary: "A later message says the attachment was missing.",
+    })).status).toBe("reopened");
+
+    const events = await store.listCommitmentEvents(recorded.commitment!.id);
+    expect(events.filter((event) => event.type === "completion_evidence")).toHaveLength(3);
+    expect((await store.readCard("primary-work", recorded.commitment!.owner.cardId)).status).toBe("to_review_updated");
+  });
+
+  test("preserves prior provenance when a source signal is edited, deleted, or retracted", async () => {
+    const { store, domain, primarySource, primaryRun } = await setup();
+    const recorded = await domain.recordCommitmentCandidate("primary-work", {
+      sourceId: primarySource.id,
+      sourceRunId: primaryRun,
+      snapshotId: "snapshot-1",
+      signalKind: "meeting_note",
+      deduplicationKey: "source-change-provenance",
+      explicitness: "explicit_first_person_bounded",
+      certainty: 0.99,
+      normalized: { promise: "Preserve this prior source claim" },
+      judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
+      sourceClass: "meeting_notes",
+      qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work" },
+    });
+    await domain.recordCommitmentSignalChange(recorded.candidate.id, {
+      kind: "retracted",
+      reason: "The source author retracted the statement; confirmation is required.",
+    });
+
+    const preserved = await store.readWorkspaceCommitment(recorded.commitment!.id);
+    expect(preserved.signals).toEqual([recorded.candidate.signal]);
+    expect((await store.listCommitmentEvents(preserved.id)).at(-1)).toMatchObject({ type: "signal_changed", detail: { kind: "retracted" } });
+    expect((await store.readCard(preserved.owner.feedId, preserved.owner.cardId))).toMatchObject({
+      status: "to_review_updated",
+      blocks: expect.arrayContaining([expect.objectContaining({ label: "Source evidence changed" })]),
+    });
+  });
+
+  test("re-homes a versioned owner card but refuses while active work exists", async () => {
+    const { store, domain, primarySource, primaryRun } = await setup();
+    const first = await domain.recordCommitmentCandidate("primary-work", {
+      sourceId: primarySource.id,
+      sourceRunId: primaryRun,
+      snapshotId: "snapshot-1",
+      sourceSignalKey: "rehome-success",
+      signalKind: "meeting_note",
+      deduplicationKey: "rehome-success",
+      explicitness: "explicit_first_person_bounded",
+      certainty: 0.99,
+      normalized: { promise: "Move this commitment to the side project" },
+      judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
+      sourceClass: "meeting_notes",
+      qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work" },
+    });
+    const previousOwner = first.commitment!.owner;
+    const moved = await domain.rehomeCommitment(first.commitment!.id, {
+      targetFeedId: "side-project",
+      expectedVersion: first.commitment!.version,
+      reason: "This obligation belongs with the side-project workflow.",
+    });
+    expect(moved.owner).toEqual({ feedId: "side-project", cardId: previousOwner.cardId });
+    expect(await store.hasCard(previousOwner.feedId, previousOwner.cardId)).toBe(false);
+    expect(await store.hasCard(moved.owner.feedId, moved.owner.cardId)).toBe(true);
+    expect((await store.listCommitmentEvents(moved.id)).at(-1)).toMatchObject({ type: "owner_changed" });
+
+    const secondRun = await domain.recordSourceRun("primary-work", primarySource.id, [{ id: "note-2" }], [], { cursor: "note-2" });
+    const second = await domain.recordCommitmentCandidate("primary-work", {
+      sourceId: primarySource.id,
+      sourceRunId: secondRun,
+      snapshotId: "snapshot-1",
+      sourceSignalKey: "rehome-blocked",
+      signalKind: "meeting_note",
+      deduplicationKey: "rehome-blocked",
+      explicitness: "explicit_first_person_bounded",
+      certainty: 0.99,
+      normalized: { promise: "Keep active work pinned to its current owner" },
+      judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
+      sourceClass: "meeting_notes",
+      qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work" },
+    });
+    await domain.queueWorkspaceInstruction({
+      cardRef: second.commitment!.owner,
+      commitmentId: second.commitment!.id,
+      expectedCommitmentVersion: second.commitment!.version,
+      instruction: "Start handling this commitment.",
+    });
+    await expect(domain.rehomeCommitment(second.commitment!.id, {
+      targetFeedId: "side-project",
+      expectedVersion: second.commitment!.version,
+      reason: "Attempt to move active work.",
+    })).rejects.toThrow("queued, working, or approved work");
   });
 
   test("enriches an existing owner card without replacing its draft or CTA", async () => {
@@ -231,6 +440,7 @@ describe("workspace commitments", () => {
       certainty: 0.99,
       normalized: { promise: "Send the revised brief" },
       judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
       sourceClass: "email",
       qualityGatePassed: true,
       ownerHint: { feedId: "primary-work", cardId: "existing-mail-card" },
@@ -255,17 +465,19 @@ describe("workspace commitments", () => {
       sourceId: primarySource.id, sourceRunId: primaryRun, snapshotId: "snapshot-1", signalKind: "meeting_note",
       sourceSignalKey: "promise-1",
       deduplicationKey: "reversible-merge", explicitness: "explicit_first_person_bounded", certainty: 0.98,
-      normalized, judgmentPolicyVersion: "commitment-v1", sourceClass: "meeting_notes", qualityGatePassed: true,
+      normalized, judgmentPolicyVersion: "commitment-v1", ...TEST_JUDGMENT, sourceClass: "meeting_notes", qualityGatePassed: true,
       ownerHint: { feedId: "primary-work" },
     });
     const second = await domain.recordCommitmentCandidate("side-project", {
       sourceId: sideSource.id, sourceRunId: sideRun, snapshotId: "snapshot-1", signalKind: "email",
       sourceSignalKey: "promise-2",
       deduplicationKey: "reversible-merge", explicitness: "explicit_first_person_bounded", certainty: 0.96,
-      normalized, judgmentPolicyVersion: "commitment-v1", sourceClass: "email", qualityGatePassed: true,
+      normalized, judgmentPolicyVersion: "commitment-v1", ...TEST_JUDGMENT, sourceClass: "email", qualityGatePassed: true,
       ownerHint: { feedId: "primary-work" },
     });
     expect(second.candidate.signal.candidateId).toBe(second.candidate.id);
+    expect(second.commitment).toBeNull();
+    await domain.confirmCommitmentCandidate(second.candidate.id, true);
 
     const split = await domain.splitCommitmentCandidate(second.candidate.id, {
       deduplicationKey: "revised-investor-brief",
@@ -280,7 +492,7 @@ describe("workspace commitments", () => {
       sourceId: sideSource.id, sourceRunId: sideRun, snapshotId: "snapshot-1", signalKind: "email",
       sourceSignalKey: "promise-2",
       deduplicationKey: "reversible-merge", explicitness: "explicit_first_person_bounded", certainty: 0.96,
-      normalized, judgmentPolicyVersion: "commitment-v1", sourceClass: "email", qualityGatePassed: true,
+      normalized, judgmentPolicyVersion: "commitment-v1", ...TEST_JUDGMENT, sourceClass: "email", qualityGatePassed: true,
       ownerHint: { feedId: "primary-work" },
     });
     expect(replay.candidate.id).toBe(second.candidate.id);
@@ -297,6 +509,31 @@ describe("workspace commitments", () => {
     expect(restoredCard.status).not.toBe("done");
     expect(restoredCard.completedAt).toBeUndefined();
     expect((await store.listCommitmentEvents(relinked.target.id)).at(-1)).toMatchObject({ type: "signal_relinked" });
+  });
+
+  test("refuses to empty a fulfilled commitment through split without a valid lifecycle transition", async () => {
+    const { domain, primarySource, primaryRun } = await setup();
+    const recorded = await domain.recordCommitmentCandidate("primary-work", {
+      sourceId: primarySource.id,
+      sourceRunId: primaryRun,
+      snapshotId: "snapshot-1",
+      signalKind: "meeting_note",
+      deduplicationKey: "fulfilled-split-guard",
+      explicitness: "explicit_first_person_bounded",
+      certainty: 0.99,
+      normalized: { promise: "Send the final launch brief" },
+      judgmentPolicyVersion: "commitment-v1",
+      ...TEST_JUDGMENT,
+      sourceClass: "meeting_notes",
+      qualityGatePassed: true,
+      ownerHint: { feedId: "primary-work" },
+    });
+    await domain.transitionCommitment(recorded.commitment!.id, "fulfilled", "Delivery was verified.");
+
+    await expect(domain.splitCommitmentCandidate(recorded.candidate.id, {
+      deduplicationKey: "different-fulfilled-brief",
+      reason: "Try to move the only receipt.",
+    })).rejects.toThrow("cannot transition from fulfilled to superseded");
   });
 
   test("rehydrates the canonical index and event history from SQLite after restart", async () => {
@@ -322,6 +559,7 @@ describe("workspace commitments", () => {
         certainty: 0.99,
         normalized: { promise: "Send the restart proof" },
         judgmentPolicyVersion: "commitment-v1",
+        ...TEST_JUDGMENT,
         sourceClass: "meeting_notes",
         qualityGatePassed: true,
         ownerHint: { feedId: "primary-work" },

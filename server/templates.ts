@@ -217,8 +217,15 @@ only when Tend's bundled KTD15 receipt validates this provider-derived source cl
 is an explicit first-person bounded promise. Send implied assignments, quoted promises, soft intent,
 and uncertain matches through the visible confirmation card. Never treat the caller-provided
 \`qualityGatePassed\` field as authority; Tend independently intersects it with the bundled gate.
+Record the exact \`judgmentModel\`, \`judgmentRuntime\`, and bundled \`judgmentRecipeDigest\` used
+for every candidate. An unvalidated model, policy, or recipe digest always routes to confirmation.
 Give every distinct promise in a source snapshot a stable non-content \`sourceSignalKey\`; replay the
 same key on later passes even if its canonical commitment grouping is corrected.
+
+For urgent reply, decision, or deadline cards that are not commitments, include typed
+\`attentionPriority\` with domain, consequence, dueAt when known, certainty, judgment policy/model/runtime,
+and Tend's bundled priority recipe digest. These cards share the same deterministic Now ordering and
+must never be hidden merely because they do not carry commitment metadata.
 `,
   };
 }

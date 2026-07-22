@@ -33,6 +33,11 @@ export async function post<T>(url: string, value: unknown = {}): Promise<T> {
   throw new Error("Local mutation authorization failed.");
 }
 
+export async function localRead<T>(url: string): Promise<T> {
+  const token = await localMutationToken();
+  return api<T>(url, { headers: { "x-attention-read-token": token } });
+}
+
 function localMutationToken(): Promise<string> {
   mutationTokenPromise ??= api<{ mutationToken: string }>("/api/session")
     .then((session) => session.mutationToken)

@@ -149,7 +149,7 @@ export function collectIMessageReadOnly(
       observedIdentity: { device: (dependencies.hostname ?? os.hostname()).trim().toLowerCase() },
       scope: { since: since.toISOString(), ...(after ? { after } : {}), limit },
       messages: visible.map(minimizeMessage),
-      nextWatermark: last ? { appleDate: last.apple_date, rowId: last.row_id } : null,
+      nextWatermark: last ? { appleDate: last.apple_date, rowId: last.row_id } : after ?? null,
       truncated: rows.length > limit,
     };
   } catch (error) {

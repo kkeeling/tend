@@ -4,6 +4,36 @@ import { digest } from "../util";
 const consequenceScore = { low: 0, medium: 100, high: 250, severe: 500 } as const;
 const DOMAIN_TIER_SCORE = 10_000;
 export const DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION = "priority-v1";
+export const PRIORITY_RECIPE = "Rank by approved domain order, then bounded urgency, consequence, certainty, and blocked state; allow only the configured imminent or high-consequence lower-domain override.";
+export const PRIORITY_RECIPE_DIGEST = digest(PRIORITY_RECIPE);
+export const PRIORITY_JUDGMENT_MODEL = "deterministic-priority-engine";
+export const PRIORITY_JUDGMENT_RUNTIME = "tend-server";
+
+export function evaluateAttentionPriority(
+  input: { domain: string; consequence: "low" | "medium" | "high" | "severe"; dueAt?: string; certainty: number },
+  ruleSet: PriorityRuleSet,
+  now: Date,
+): { score: number; explanation: string; overrideReason?: string } {
+  const domainIndex = ruleSet.rules.domainOrder.indexOf(input.domain);
+  const due = dueBand(input.dueAt, now);
+  const consequence = consequenceScore[input.consequence];
+  const certainty = Math.round(input.certainty * 100);
+  const lowerDomain = domainIndex > 0;
+  const imminent = due.minutes !== null && due.minutes <= ruleSet.rules.imminentWithinMinutes;
+  const highConsequence = input.consequence === "high" || input.consequence === "severe";
+  const overrideEligible = ruleSet.rules.severeConsequenceOverride && lowerDomain && (imminent || highConsequence);
+  const normalDomainTier = domainIndex < 0 ? 0 : ruleSet.rules.domainOrder.length - domainIndex;
+  const effectiveDomainTier = overrideEligible ? ruleSet.rules.domainOrder.length : normalDomainTier;
+  const score = effectiveDomainTier * DOMAIN_TIER_SCORE + due.score + consequence + certainty;
+  const explanation = `${input.domain} contributes domain tier ${normalDomainTier}; ${due.label} contributes ${due.score}; ${input.consequence} consequence contributes ${consequence}; certainty contributes ${certainty}.`;
+  const overrideReason = overrideEligible
+    ? `Lower-domain work is override-eligible because ${[
+        imminent ? `it is imminent (${due.label})` : "",
+        highConsequence ? `it has ${input.consequence} consequence` : "",
+      ].filter(Boolean).join(" and ")}.`
+    : undefined;
+  return { score, explanation, ...(overrideReason ? { overrideReason } : {}) };
+}
 
 function dueBand(dueAt: string | undefined, now: Date): { label: string; score: number; minutes: number | null } {
   if (!dueAt) return { label: "no due date", score: 0, minutes: null };
@@ -63,6 +93,9 @@ export function evaluatePriorityRows(
       ruleSetId: ruleSet.id,
       ruleVersion: ruleSet.version,
       judgmentPolicyVersion,
+      judgmentModel: PRIORITY_JUDGMENT_MODEL,
+      judgmentRuntime: PRIORITY_JUDGMENT_RUNTIME,
+      judgmentRecipeDigest: PRIORITY_RECIPE_DIGEST,
       rank,
       score: draft.score,
       overrideReason: overrideReason ?? null,
@@ -78,6 +111,9 @@ export function evaluatePriorityRows(
       ruleSetId: ruleSet.id,
       ruleVersion: ruleSet.version,
       judgmentPolicyVersion,
+      judgmentModel: PRIORITY_JUDGMENT_MODEL,
+      judgmentRuntime: PRIORITY_JUDGMENT_RUNTIME,
+      judgmentRecipeDigest: PRIORITY_RECIPE_DIGEST,
       inputDigest,
       evaluatedAt: now.toISOString(),
     };

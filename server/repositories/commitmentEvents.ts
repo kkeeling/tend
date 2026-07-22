@@ -29,10 +29,9 @@ export class FileCommitmentEventRepository implements CommitmentEventRepository 
 export class MirroredCommitmentEventRepository implements CommitmentEventRepository {
   constructor(private readonly primary: CommitmentEventRepository, private readonly mirror: CommitmentEventRepository, private readonly mirrorWrites?: MirrorWriteCoordinator) {}
   async init(): Promise<void> {
-    await this.mirror.init(); await this.primary.init();
+    await this.primary.init(); await this.mirror.init();
     const primary = await this.primary.list(); const mirror = await this.mirror.list();
-    const primaryIds = new Set(primary.map((item) => item.id)); const mirrorIds = new Set(mirror.map((item) => item.id));
-    for (const item of mirror.filter((event) => !primaryIds.has(event.id))) await this.primary.append(item);
+    const mirrorIds = new Set(mirror.map((item) => item.id));
     for (const item of primary.filter((event) => !mirrorIds.has(event.id))) await this.mirror.append(item);
   }
   list(commitmentId?: string): Promise<CommitmentEvent[]> { return this.primary.list(commitmentId); }

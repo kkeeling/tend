@@ -94,17 +94,18 @@ async function collectWithHelper(options: {
   run: (command: string[]) => Promise<CommandResult>;
 }): Promise<Record<string, unknown>> {
   const { helperPath, helperArguments, temporaryRoot, timeoutMs, now, sleep, run } = options;
-  const temporaryDirectory = await mkdtemp(path.join(temporaryRoot, "tend-imessage-collect-"));
-  const stdoutPath = path.join(temporaryDirectory, "result.json");
-  const stderrPath = path.join(temporaryDirectory, "error.json");
   const label = `com.every.tend.imessage-collect.${process.pid}.${randomUUID()}`;
-  await chmod(temporaryDirectory, 0o700);
-  await Promise.all([
-    writeFile(stdoutPath, "", { flag: "wx", mode: 0o600 }),
-    writeFile(stderrPath, "", { flag: "wx", mode: 0o600 }),
-  ]);
+  let temporaryDirectory: string | undefined;
 
   try {
+    temporaryDirectory = await mkdtemp(path.join(temporaryRoot, "tend-imessage-collect-"));
+    const stdoutPath = path.join(temporaryDirectory, "result.json");
+    const stderrPath = path.join(temporaryDirectory, "error.json");
+    await chmod(temporaryDirectory, 0o700);
+    await Promise.all([
+      writeFile(stdoutPath, "", { flag: "wx", mode: 0o600 }),
+      writeFile(stderrPath, "", { flag: "wx", mode: 0o600 }),
+    ]);
     const submission = await run([
       "launchctl",
       "submit",
@@ -135,7 +136,7 @@ async function collectWithHelper(options: {
     try {
       await removeLaunchdJob(run, label);
     } finally {
-      await rm(temporaryDirectory, { recursive: true, force: true });
+      if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
     }
   }
 }

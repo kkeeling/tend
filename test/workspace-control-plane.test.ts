@@ -38,7 +38,7 @@ describe("workspace control plane parity", () => {
 
   test("HTTP exposes the canonical read model and routes instructions only to the owner feed", async () => {
     const { app, store } = await setup();
-    const response = await app.request("/api/workspace/now");
+    const response = await app.request("/api/workspace/now", { headers: { "x-attention-read-token": "test-token" } });
     expect(response.status).toBe(200);
     const now = await response.json() as { items: Array<{ id: string }> };
     expect(now.items.map((item) => item.id)).toContain("side-project:shared");
