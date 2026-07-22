@@ -7,15 +7,18 @@ export type ReleaseBinaryPaths = {
 
 export type CommandRunner = (command: string[]) => Promise<void>;
 
+export const TEND_CODE_SIGNING_IDENTIFIER = "com.every.tend";
+export const IMESSAGE_HELPER_CODE_SIGNING_IDENTIFIER = "com.every.tend.imessage-helper";
+
 export function macOSBinarySignatureSpecs(paths: ReleaseBinaryPaths): Array<{
   path: string;
   identifier: string;
 }> {
   return [
-    { path: paths.tend, identifier: "com.every.tend" },
+    { path: paths.tend, identifier: TEND_CODE_SIGNING_IDENTIFIER },
     {
       path: paths.imessageHelper,
-      identifier: "com.every.tend.imessage-helper",
+      identifier: IMESSAGE_HELPER_CODE_SIGNING_IDENTIFIER,
     },
   ];
 }
@@ -29,17 +32,27 @@ export async function signAndVerifyReleaseBinaries(
 
   const binaries = macOSBinarySignatureSpecs(paths);
   for (const binary of binaries) {
-    await run([
-      "codesign",
-      "--force",
-      "--sign",
-      "-",
-      "--identifier",
-      binary.identifier,
-      binary.path,
-    ]);
+    await signMacOSBinary(binary.path, binary.identifier, platform, run);
   }
   await verifyReleaseBinarySignatures(paths, platform, run);
+}
+
+export async function signMacOSBinary(
+  binaryPath: string,
+  identifier: string,
+  platform: string = process.platform,
+  run: CommandRunner = runCommand,
+): Promise<void> {
+  if (platform !== "darwin") return;
+  await run([
+    "codesign",
+    "--force",
+    "--sign",
+    "-",
+    "--identifier",
+    identifier,
+    binaryPath,
+  ]);
 }
 
 export async function verifyReleaseBinarySignatures(
@@ -50,16 +63,26 @@ export async function verifyReleaseBinarySignatures(
   if (platform !== "darwin") return;
 
   for (const binary of macOSBinarySignatureSpecs(paths)) {
-    await run([
-      "codesign",
-      "--verify",
-      "--strict",
-      "--verbose=2",
-      "--test-requirement",
-      `=identifier "${binary.identifier}"`,
-      binary.path,
-    ]);
+    await verifyMacOSBinarySignature(binary.path, binary.identifier, platform, run);
   }
+}
+
+export async function verifyMacOSBinarySignature(
+  binaryPath: string,
+  identifier: string,
+  platform: string = process.platform,
+  run: CommandRunner = runCommand,
+): Promise<void> {
+  if (platform !== "darwin") return;
+  await run([
+    "codesign",
+    "--verify",
+    "--strict",
+    "--verbose=2",
+    "--test-requirement",
+    `=identifier "${identifier}"`,
+    binaryPath,
+  ]);
 }
 
 async function runCommand(command: string[]): Promise<void> {

@@ -132,7 +132,12 @@ as a Codex child:
 Keep the prior package while validating an upgrade. macOS may retain Full Disk Access on that
 versioned helper path. If the new sibling path is denied or remains silent until timeout, Tend can
 reuse the prior helper only when its bytes exactly match the current packaged helper. A changed helper
-build is never substituted and requires a fresh human grant to the new helper path.
+build is never substituted and requires a fresh human grant to the new helper path. Local builds
+reuse a strictly verified signed helper from the fixed owner-only
+`~/.cache/tend/imessage-helper` directory only when its exact source, Bun version, platform,
+architecture, TypeScript build configuration, compiler mode, and signing identity key is unchanged,
+preventing release-only rebuild noise from forcing another approval. The build does not accept a
+cache-path override.
 
 ## Codex Setup
 

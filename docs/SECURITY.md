@@ -68,6 +68,11 @@ short windows that support a published signal.
 - Its CLI exposes one bounded `collect` operation, no arbitrary path/query, and no send/delete API.
 - Denial/timeout upgrade fallback is limited to prior installed package helpers whose bytes exactly
   match the current sibling helper; changed builds and arbitrary paths are ineligible.
+- Local macOS builds cache only a strictly verified, signed helper in the fixed owner-only
+  `~/.cache/tend/imessage-helper` directory, keyed by exact helper source, Bun version, platform,
+  architecture, TypeScript build configuration, compiler mode, and signing identity. There is no
+  cache-path override. An invalid cached signature fails the build closed rather than being replaced
+  or signed implicitly.
 - A fixed parameterized query returns a minimized projection and omits attachments. Permission and
   schema failures become explicit degraded coverage outcomes and never advance a source checkpoint.
 

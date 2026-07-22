@@ -90,9 +90,15 @@ Each archive contains:
 On macOS, `pnpm tend:build` replaces Bun's linker signature with valid ad-hoc signatures using
 stable identifiers for both executables. `pnpm tend:package` verifies both signatures and fails
 closed before creating an archive if either binary was modified after signing. Ad-hoc signing does
-not establish a trusted developer identity. After a path-specific denial or silent timeout, Tend can
+not establish a trusted developer identity. The build keeps a mode-`0700`, content-keyed helper cache
+under the fixed `~/.cache/tend/imessage-helper` path; the key covers the exact helper sources, Bun
+version, platform, architecture, TypeScript build configuration, compiler mode, and signing
+identity. The path has no environment override. When those inputs are unchanged, the next local
+prerelease reuses and re-verifies the same signed helper bytes. After a path-specific denial or
+silent timeout, Tend can therefore
 reuse an already-authorized prior package path only when that helper is byte-identical to the current
-packaged helper; a changed helper build may require Full Disk Access to be granted again.
+packaged helper. Changed helper source or build-runtime inputs deliberately produce a new cache key
+and may require Full Disk Access to be granted again.
 
 ## Automation
 

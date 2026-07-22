@@ -5,6 +5,12 @@ a promise of ongoing maintenance.
 
 ## Unreleased
 
+## 0.3.0-keeling.7 - 2026-07-22
+
+- Reuse a strictly verified, content-keyed signed iMessage helper across local prerelease builds
+  when its exact source and build-runtime inputs are unchanged, preserving least-privilege macOS
+  approval without relaxing the byte-identical runtime fallback.
+
 ## 0.3.0-keeling.6 - 2026-07-22
 
 - Separate local card dismissal from source cleanup. `tend cli card:dismiss` now moves a reviewable
