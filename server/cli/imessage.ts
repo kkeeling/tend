@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { print } from "./shared";
@@ -17,6 +17,7 @@ type CommandResult = {
 export type IMessageLaunchdDependencies = {
   platform?: string;
   helperPath?: string;
+  helperPaths?: string[];
   temporaryRoot?: string;
   timeoutMs?: number;
   now?: () => number;
@@ -42,21 +43,48 @@ export async function collectIMessageViaLaunchd(
     throw new Error("The Tend Messages collector is available only on macOS.");
   }
 
-  const helperPath = dependencies.helperPath ?? resolvePackagedHelperPath();
-  if (!existsSync(helperPath)) {
+  const packagedHelperPath = dependencies.helperPath ?? resolvePackagedHelperPath();
+  if (!existsSync(packagedHelperPath)) {
     throw new Error("The packaged tend-imessage-helper is missing beside the Tend binary.");
   }
+  const helperPaths = dependencies.helperPaths
+    ?? (dependencies.helperPath ? [packagedHelperPath] : await resolvePackagedHelperPaths(packagedHelperPath));
   const now = dependencies.now ?? Date.now;
   const helperArguments = normalizeCollectArguments(args, new Date(now()));
   const temporaryRoot = dependencies.temporaryRoot ?? os.tmpdir();
-  const temporaryDirectory = await mkdtemp(path.join(temporaryRoot, "tend-imessage-collect-"));
-  const stdoutPath = path.join(temporaryDirectory, "result.json");
-  const stderrPath = path.join(temporaryDirectory, "error.json");
-  const label = `com.every.tend.imessage-collect.${process.pid}.${randomUUID()}`;
   const run = dependencies.run ?? runCommand;
   const sleep = dependencies.sleep ?? ((milliseconds: number) => Bun.sleep(milliseconds));
   const timeoutMs = dependencies.timeoutMs ?? 30_000;
 
+  for (let index = 0; index < helperPaths.length; index += 1) {
+    const result = await collectWithHelper({
+      helperPath: helperPaths[index]!,
+      helperArguments,
+      temporaryRoot,
+      timeoutMs,
+      now,
+      sleep,
+      run,
+    });
+    if (result.outcome !== "permission_denied" || index === helperPaths.length - 1) return result;
+  }
+  throw new Error("No packaged Messages helper candidate returned a result.");
+}
+
+async function collectWithHelper(options: {
+  helperPath: string;
+  helperArguments: string[];
+  temporaryRoot: string;
+  timeoutMs: number;
+  now: () => number;
+  sleep: (milliseconds: number) => Promise<void>;
+  run: (command: string[]) => Promise<CommandResult>;
+}): Promise<Record<string, unknown>> {
+  const { helperPath, helperArguments, temporaryRoot, timeoutMs, now, sleep, run } = options;
+  const temporaryDirectory = await mkdtemp(path.join(temporaryRoot, "tend-imessage-collect-"));
+  const stdoutPath = path.join(temporaryDirectory, "result.json");
+  const stderrPath = path.join(temporaryDirectory, "error.json");
+  const label = `com.every.tend.imessage-collect.${process.pid}.${randomUUID()}`;
   await chmod(temporaryDirectory, 0o700);
   await Promise.all([
     writeFile(stdoutPath, "", { flag: "wx", mode: 0o600 }),
@@ -158,6 +186,38 @@ function resolvePackagedHelperPath(): string {
     if (existsSync(helperPath)) return helperPath;
   }
   return path.join(path.dirname(path.resolve(process.execPath)), "tend-imessage-helper");
+}
+
+async function resolvePackagedHelperPaths(packagedHelperPath: string): Promise<string[]> {
+  const packageDirectory = path.dirname(packagedHelperPath);
+  const installRoot = path.dirname(packageDirectory);
+  const suffix = `-${process.platform}-${process.arch}`;
+  let entries;
+  try {
+    entries = await readdir(installRoot, { withFileTypes: true });
+  } catch {
+    return [packagedHelperPath];
+  }
+  const candidates = entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("tend-") && entry.name.endsWith(suffix))
+    .map((entry) => path.join(installRoot, entry.name, "tend-imessage-helper"))
+    .sort((left, right) => right.localeCompare(left));
+  return identicalHelperCandidates(packagedHelperPath, [packagedHelperPath, ...candidates]);
+}
+
+export async function identicalHelperCandidates(packagedHelperPath: string, candidates: string[]): Promise<string[]> {
+  const packagedDigest = await fileDigest(packagedHelperPath);
+  const matching: string[] = [];
+  for (const candidate of candidates) {
+    const resolved = path.resolve(candidate);
+    if (matching.includes(resolved) || !existsSync(resolved)) continue;
+    if (await fileDigest(resolved) === packagedDigest) matching.push(resolved);
+  }
+  return matching;
+}
+
+async function fileDigest(filename: string): Promise<string> {
+  return createHash("sha256").update(await readFile(filename)).digest("hex");
 }
 
 async function firstCompleteResult(

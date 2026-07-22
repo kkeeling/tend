@@ -129,6 +129,11 @@ as a Codex child:
 ./tend imessage collect --since 2026-07-20T00:00:00Z --limit 200
 ```
 
+Keep the prior package while validating an upgrade. macOS may retain Full Disk Access on that
+versioned helper path. If the new sibling path is denied, Tend can reuse the prior helper only when
+its bytes exactly match the current packaged helper. A changed helper build is never substituted and
+requires a fresh human grant to the new helper path.
+
 ## Codex Setup
 
 Create or choose a feed in Tend, then start one fresh Codex Desktop thread for that feed. Do not

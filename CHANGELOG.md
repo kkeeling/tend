@@ -17,6 +17,13 @@ a promise of ongoing maintenance.
   across the shared types, mobile projection, Swift models, and iOS controls, swipes, and activity.
 - Advance the CLI contract to `0.4` with the clearer, intentionally breaking card disposition names.
 
+## 0.3.0-keeling.3 - 2026-07-21
+
+- Preserve read-only Messages access across versioned installs by reusing only byte-identical
+  packaged helpers when macOS Full Disk Access remains attached to a prior package path.
+- Bring mobile card actions, history controls, scope controls, and control-plane navigation up to
+  explicit touch-target sizing after live responsive browser QA.
+
 ## 0.3.0-keeling.2 - 2026-07-21
 
 - Re-sign macOS release executables with stable ad-hoc identifiers after Bun compilation so Full

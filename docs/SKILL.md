@@ -83,11 +83,14 @@ Access to Codex, the main Tend binary, a shell, or a wrapper. Collect through th
 tend imessage collect --since <ISO-8601> [--after-apple-date <decimal> --after-row-id <integer>] [--limit <1-500>]
 ```
 
-This command derives the sibling helper path, submits that exact helper as a uniquely labeled `launchd`
-job with the helper path also supplied as `argv[0]`, accepts only the fixed bounded collection options,
-captures one JSON result in an owner-only temporary directory, and removes both the job and temporary
-files on success, failure, or timeout. Do not reproduce this lifecycle with agent-authored shell
-commands. No other process may open `chat.db`, and no Messages mutation is exposed.
+This command derives the sibling helper path and submits that exact helper as a uniquely labeled
+`launchd` job with the helper path also supplied as `argv[0]`. If macOS denies only the new versioned
+path, Tend may retry a prior installed package helper only when its bytes exactly match the current
+packaged helper; arbitrary paths and changed helper builds are never eligible. The command accepts
+only the fixed bounded collection options, captures one JSON result in an owner-only temporary
+directory, and removes every job and temporary file on success, failure, or timeout. Do not reproduce
+this lifecycle with agent-authored shell commands. No other process may open `chat.db`, and no
+Messages mutation is exposed.
 
 ## Completing Work
 

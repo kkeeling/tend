@@ -446,12 +446,14 @@ pre { overflow: auto; padding: 12px; background: #f4f2eb; color: var(--ink-2); w
   .card-history li { grid-template-columns: 1fr; gap: 1px; }
   .queued-note { margin: 15px -17px 0; padding: 13px 17px; }
   .card-action { align-items: flex-start; flex-direction: column; margin: 0 -17px; padding: 13px 17px; }
+  .card-action .button, .parked-work-actions .button { min-height: 44px; }
+  .history-toggle { min-height: 44px; padding: 0 8px; }
   .end-cap { align-items: flex-start; flex-direction: column; }
   .dock { padding: 10px 9px; }
   .dock-hints { display: none; }
   .dock-footer { justify-content: flex-end; }
   .scope-buttons::before, .scope-buttons button span { display: none; }
-  .scope-buttons button { width: 24px; justify-content: center; padding: 0; }
+  .scope-buttons button { width: 44px; height: 44px; justify-content: center; padding: 0; }
   .proposal-diff { grid-template-columns: 1fr; }
   .routine-group-head { align-items: flex-start; flex-direction: column; }
   .workspace-page { padding: 24px 14px 180px; }
@@ -459,6 +461,7 @@ pre { overflow: auto; padding: 12px; background: #f4f2eb; color: var(--ink-2); w
   .thread-setup-command { align-items: stretch; flex-direction: column; }
   .learning-page { padding: 24px 14px 180px; }
   .control-nav { gap: 17px; padding: 0 15px; }
+  .control-nav a { min-width: 44px; text-align: center; }
   .control-nav .control-brand { margin-right: 2px; }
   .control-page { padding: 31px 15px 160px; }
   .control-hero { align-items: stretch; flex-direction: column; gap: 19px; }

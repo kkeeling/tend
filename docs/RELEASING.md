@@ -88,8 +88,9 @@ Each archive contains:
 On macOS, `pnpm tend:build` replaces Bun's linker signature with valid ad-hoc signatures using
 stable identifiers for both executables. `pnpm tend:package` verifies both signatures and fails
 closed before creating an archive if either binary was modified after signing. Ad-hoc signing does
-not establish a trusted developer identity, and macOS may require Full Disk Access to be granted
-again after installing a new helper build.
+not establish a trusted developer identity. Tend can reuse an already-authorized prior package path
+only when that helper is byte-identical to the current packaged helper; a changed helper build may
+require Full Disk Access to be granted again.
 
 ## Automation
 

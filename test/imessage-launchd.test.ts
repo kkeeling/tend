@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
   collectIMessageViaLaunchd,
+  identicalHelperCandidates,
   normalizeCollectArguments,
 } from "../server/cli/imessage";
 
@@ -99,6 +100,65 @@ describe("packaged Messages launchd runner", () => {
     expect(result).toEqual({ ok: false, outcome: "permission_denied" });
     expect(commands.at(-1)?.slice(0, 2)).toEqual(["launchctl", "remove"]);
     expect(await readdir(root)).toEqual(["tend-imessage-helper"]);
+  });
+
+  test("reuses a byte-identical prior helper after the current package path is denied", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "tend-imessage-upgrade-test-"));
+    roots.push(root);
+    const current = path.join(root, "tend-current", "tend-imessage-helper");
+    const previous = path.join(root, "tend-previous", "tend-imessage-helper");
+    await Promise.all([mkdir(path.dirname(current)), mkdir(path.dirname(previous))]);
+    await Promise.all([
+      writeFile(current, "identical-helper", { mode: 0o700 }),
+      writeFile(previous, "identical-helper", { mode: 0o700 }),
+    ]);
+    const commands: string[][] = [];
+    const result = await collectIMessageViaLaunchd([
+      "collect",
+      "--since",
+      "2026-07-21T00:00:00Z",
+    ], {
+      platform: "darwin",
+      helperPath: current,
+      helperPaths: [current, previous],
+      temporaryRoot: root,
+      now: () => Date.parse("2026-07-22T00:00:00Z"),
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "submit") {
+          const output = command[command.indexOf("-o") + 1]!;
+          const error = command[command.indexOf("-e") + 1]!;
+          const helper = command[command.indexOf("-p") + 1];
+          const response = helper === current
+            ? { ok: false, outcome: "permission_denied" }
+            : { ok: true, schema: "tend.imessage.readonly.v1", messages: [] };
+          await writeFile(helper === current ? error : output, `${JSON.stringify(response)}\n`);
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    expect(result).toMatchObject({ ok: true, schema: "tend.imessage.readonly.v1" });
+    expect(commands.filter((command) => command[1] === "submit").map((command) => command[command.indexOf("-p") + 1]))
+      .toEqual([current, previous]);
+    expect(commands.filter((command) => command[1] === "remove")).toHaveLength(2);
+    expect((await readdir(root)).sort()).toEqual(["tend-current", "tend-previous"]);
+  });
+
+  test("allows fallback candidates only when their bytes match the current packaged helper", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "tend-imessage-candidate-test-"));
+    roots.push(root);
+    const current = path.join(root, "current");
+    const identical = path.join(root, "identical");
+    const changed = path.join(root, "changed");
+    await Promise.all([
+      writeFile(current, "same-helper"),
+      writeFile(identical, "same-helper"),
+      writeFile(changed, "different-helper"),
+    ]);
+
+    expect(await identicalHelperCandidates(current, [current, identical, changed, current, path.join(root, "missing")]))
+      .toEqual([current, identical]);
   });
 
   test("rejects unbounded or malformed arguments before launching", () => {

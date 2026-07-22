@@ -54,6 +54,8 @@ short windows that support a published signal.
 - Full Disk Access belongs only to the optional `tend-imessage-helper`, never the main Tend server.
 - The helper opens only `~/Library/Messages/chat.db` with SQLite read-only and `query_only` controls.
 - Its CLI exposes one bounded `collect` operation, no arbitrary path/query, and no send/delete API.
+- Upgrade fallback is limited to prior installed package helpers whose bytes exactly match the
+  current sibling helper; changed builds and arbitrary paths are ineligible.
 - A fixed parameterized query returns a minimized projection and omits attachments. Permission and
   schema failures become explicit degraded coverage outcomes and never advance a source checkpoint.
 
