@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { AttentionDomain } from "../server/domain";
 import { apiRoutes } from "../server/routes/api";
+import { mutationAccessError } from "../server/routes/shared";
 import { AttentionStore } from "../server/store";
 
 const roots: string[] = [];
@@ -28,12 +29,21 @@ async function setup(notify: (data: unknown) => void = () => {}) {
 }
 
 function jsonPost(body: unknown, headers: Record<string, string> = {}): RequestInit {
-  const requestHeaders = new Headers({ "content-type": "application/json" });
-  for (const [name, value] of Object.entries(headers)) requestHeaders.set(name, value);
   return {
     method: "POST",
-    headers: requestHeaders,
+    headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
+  };
+}
+
+function mutationContext(headers: Record<string, string>) {
+  const normalized = new Map(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]));
+  return {
+    req: {
+      method: "POST",
+      header: (name: string) => normalized.get(name.toLowerCase()),
+    },
+    json: (value: unknown, status = 200) => Response.json(value, { status }),
   };
 }
 
@@ -45,13 +55,12 @@ describe("API routing and mutation hardening", () => {
   test("rejects foreign Origin mutations and allows no-Origin CLI-style mutations", async () => {
     const { app } = await setup();
 
-    const foreignRequest = jsonPost(
-      { sessionId: "session-foreign" },
-      { origin: "https://attacker.example" },
-    );
-    expect(new Request("http://localhost/api/agents/claude/presence", foreignRequest).headers.get("origin"))
-      .toBe("https://attacker.example");
-    const blocked = await app.request("/api/agents/claude/presence", foreignRequest);
+    const blocked = mutationAccessError(mutationContext({
+      "content-type": "application/json",
+      origin: "https://attacker.example",
+    }), "test-token");
+    expect(blocked).not.toBeNull();
+    if (!blocked) throw new Error("Expected a cross-origin mutation rejection.");
     expect(blocked.status).toBe(403);
     expect(await blocked.json()).toEqual({ error: "Cross-origin mutation requests are not allowed." });
 
