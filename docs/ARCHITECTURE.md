@@ -39,6 +39,18 @@ permission, truncation, rate limits, identity mismatch, or staleness are visible
 workspace all-clear. Priority uses immutable approved rulesets plus versioned judgment inputs;
 evaluations and corrections are mirrored to an append-only ledger.
 
+Commitments have one feed-owned card even when evidence arrives through several feeds. A matching
+signal in a non-owner feed creates an owner-feed reconciliation item with the commitment's expected
+version; only confirmation links it. Explicit re-home is also versioned and refuses active or
+approved-blocked owner work. Typed completion evidence drives `completion_pending`, `fulfilled`, or
+`reopened`, while source edits, deletion, retraction, and conflict append history and resurface the
+owner card. Prior signal evidence is retained for audit and correction.
+
+SQLite is authoritative for life-control-plane records. File mirrors publish only after the
+enclosing transaction commits, and a failed mirror write rolls the transaction back. On restart,
+these newer records are not imported back from an orphan mirror, preventing a rolled-back write
+from becoming authoritative later.
+
 External action authority remains feed-local and digest-bound. Tend verifies a provider-neutral
 execution identity, nonce/grant, assurance level, current card owner, editable artifact, and current
 source evidence before mutation. Connector credentials and raw foreign evidence remain outside the

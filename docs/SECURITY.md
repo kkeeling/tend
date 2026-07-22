@@ -14,16 +14,21 @@ Tend is local-first and binds its development server to `127.0.0.1` by default.
   `agent_host_observed` level explicitly trusts the agent/connector host and is not cryptographic
   authentication; `trusted_adapter` requires a valid nonce-bound adapter receipt; `prepare_only`
   prohibits mutation.
+- Connector verification receipts are rechecked for freshness at execution time. A receipt that
+  was current when work was prepared cannot authorize a later mutation after its freshness window.
 - Source collection is read authority only. Every configured attempt records an outcome, failed or
   partial attempts preserve the last-good checkpoint, and browser authentication fallback is
   prohibited.
+- Stored source-attempt errors are bounded and redact email addresses, URLs, bearer material,
+  tokens, secrets, passwords, and API keys before reaching SQLite or readable mirrors.
 
 ## Localhost
 
 The API is a local HTTP endpoint and must not be exposed on a public network. Browser mutations
 require JSON, a loopback same-origin request, and a per-process mutation token fetched by the local
-UI. These checks prevent an unrelated website from silently posting to a running Tend server;
-they are not a substitute for keeping the listener on loopback.
+UI. Aggregated workspace reads also require the local read token and reject a foreign `Origin`.
+These checks prevent an unrelated website from silently reading the control plane or posting to a
+running Tend server; they are not a substitute for keeping the listener on loopback.
 
 ## Private Local State
 

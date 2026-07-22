@@ -44,6 +44,12 @@ the user wants an immediate sweep.
   trust boundary, not cryptographic authentication; `prepare_only` prohibits mutation. When
   `work:claim` returns `operatorGuidance.userAuthorization.riskConfirmation`, treat that app click
   as the user's risk confirmation for the named recipients while the verified digest still matches.
+- Commitment extraction must include the exact judgment model, runtime, and recipe digest expected
+  by the bundled quality gate. Unknown provenance fails closed. Cross-feed matches create a
+  confirmation item in the current owner feed; they do not silently mutate that card.
+- Use typed completion evidence and signal-change commands when source facts change. Re-home a
+  commitment only with its current version; Tend refuses re-home while owner work is queued,
+  working, or approved-but-blocked, and it never silently moves an external mutation grant.
 - Complete, fail, block, retry, or cancel work through `tend cli`.
 - Refresh sources only after the queue is drained, unless the claimed work explicitly asks for source collection.
 - Read `context:for-feed` before a normal source collection. A fresh update may focus the feed's
@@ -104,6 +110,9 @@ Run `tend cli help` for the full command surface. Core feed-runner commands are:
 | Confirm or reject a candidate | `tend cli commitment:candidate:confirm --candidate <candidate> --accept` or `--reject` |
 | Split a mistaken auto-merge | `tend cli commitment:candidate:split --candidate <candidate> --deduplication-key <new-key> --reason <text>` |
 | Relink a signal | `tend cli commitment:candidate:relink --candidate <candidate> --commitment <target> --reason <text>` |
+| Re-home a commitment owner | `tend cli commitment:rehome --commitment <commitment> --target-feed <feed> --version <expected-version> --reason <text> [--target-card <card>]` |
+| Record typed completion evidence | `tend cli commitment:completion:evidence --commitment <commitment> --source-feed <feed> --source <source> --run <run> --snapshot <snapshot> --kind <clear_completion\|ambiguous_completion\|contradiction> --summary <text>` |
+| Record an edited/deleted/retracted signal | `tend cli commitment:signal:change --candidate <candidate> --kind <edited\|deleted\|retracted\|conflict> --reason <text> [--run <run> --snapshot <snapshot>]` |
 | Transition a commitment | `tend cli commitment:transition --commitment <commitment> --status <lifecycle> --reason <text>` |
 | Materialize current priority | `tend cli priority:evaluate` |
 | Activate initial approved rules | `tend cli priority:rules:activate --rules <json> --reason <text>` |

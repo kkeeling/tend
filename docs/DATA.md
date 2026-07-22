@@ -46,6 +46,13 @@ ATTENTION_HOME=/path/to/attention tend start
   Full filtered OCR exists only in these local records and the dedicated `/mind` detail API; it is
   omitted from publication receipts, normal feed CLI output, cards, and logs.
 
+SQLite is the authority for source profiles and attempts, source runs, commitment candidates,
+canonical commitments and events, priority rules and ledger records, and the materialized Now
+projection. Their file mirrors are readable derived artifacts: they are published only after the
+database transaction commits and are not re-imported on restart. This deliberately prevents a
+failed or rolled-back mirror write from resurrecting state. Use `tend backup export` and import the
+database snapshot for recovery; do not treat an individual mirror file as an authoritative restore.
+
 ## Connector Credentials
 
 Tend does not store Gmail, Outlook, calendar, GitHub, Slack, Teams, Granola, browser, or other

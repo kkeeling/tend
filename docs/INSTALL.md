@@ -81,7 +81,7 @@ The package command writes `dist-bin/releases/tend-<version>-<platform>-<arch>.t
 `.sha256` checksum. The archive contains the `tend` executable, the Tend manual, built `dist/` UI
 assets, the dedicated read-only iMessage helper, README, license, contributor notes, all public
 install/architecture/agent/data/development/iPhone/security/releasing docs, the changelog, and
-operator/capability references.
+operator/capability references, including the personal-fork maintenance policy.
 The packaged executable resolves UI assets from the sibling `dist/` directory, so it can be launched
 from inside the extracted folder or by absolute path from another working directory.
 
@@ -170,6 +170,8 @@ Successful collection records a completeness proof with observed identity, water
 pagination/truncation, and permission enumeration. Failure paths use `source:attempt:record` and
 preserve the last good checkpoint. Keep profile files under private local storage, never in the
 repository. `/now` and `/coverage` withhold all-clear until every required profile is fresh.
+Healthy no-change attempts preserve the exact prior watermark and explicitly report that no
+checkpoint advance occurred.
 
 ## Health Check
 

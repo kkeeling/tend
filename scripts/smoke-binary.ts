@@ -110,6 +110,7 @@ async function validateRuntimeLocation(): Promise<{
 async function validateCliContract(): Promise<{
   commands: string[];
   workspace: boolean;
+  workspaceControlPlane: boolean;
   inspect: boolean;
   claimIdle: boolean;
   chronicleSetup: boolean;
@@ -118,6 +119,9 @@ async function validateCliContract(): Promise<{
   const commands = help.commands ?? [];
   const requiredCommands = [
     "state [--feed inbox]",
+    "workspace:now",
+    "workspace:coverage",
+    "workspace:priority",
     "context:bind --thread <Chronicle thread id> [--replace]",
     "context:publish --thread <Chronicle thread id> --context-file <path>",
     "context:status",
@@ -132,6 +136,9 @@ async function validateCliContract(): Promise<{
     "work:complete --feed <id> --work <id> --token <token> --result <json>",
     "card:upsert --feed <id> (--card <json> | --card-file <path>)",
     "source:record-run --feed <id> --source <id> --snapshots <json> --judgments <json> --checkpoint <json> [--work <recollection-work-id>] [--context-use <json> | --context-use-file <path>] [--collection-proof <json> | --collection-proof-file <path>]",
+    "commitment:rehome --commitment <id> --target-feed <feed> --version <expected-version> --reason <text> [--target-card <card>]",
+    "commitment:completion:evidence --commitment <id> --source-feed <feed> --source <id> --run <id> --snapshot <id> --kind <clear_completion|ambiguous_completion|contradiction> --summary <text>",
+    "commitment:signal:change --candidate <id> --kind <edited|deleted|retracted|conflict> --reason <text> [--run <id> --snapshot <id>]",
     "sweep:record-batch --feed <id> --runs <json-array> [--work <recollection-work-id>] [--context <mind-update-id>]",
     "learning:request --feed <id>",
   ];
@@ -148,6 +155,13 @@ async function validateCliContract(): Promise<{
   };
   if (workspace.active?.config?.name !== "Inbox")
     throw new Error("CLI state did not return the Inbox workspace.");
+
+  const now = (await cliJson(["cli", "workspace:now"])) as { items?: unknown[]; allClear?: boolean };
+  const coverage = (await cliJson(["cli", "workspace:coverage"])) as { sources?: unknown[]; allClear?: boolean };
+  const priority = (await cliJson(["cli", "workspace:priority"])) as { ledger?: unknown[]; proposals?: unknown[] };
+  if (!Array.isArray(now.items) || typeof now.allClear !== "boolean") throw new Error("CLI workspace:now did not return the canonical Now projection.");
+  if (!Array.isArray(coverage.sources) || typeof coverage.allClear !== "boolean") throw new Error("CLI workspace:coverage did not return source coverage.");
+  if (!Array.isArray(priority.ledger) || !Array.isArray(priority.proposals)) throw new Error("CLI workspace:priority did not return the priority ledger.");
 
   const inspect = (await cliJson(["cli", "inspect", "--feed", "inbox"])) as {
     feed?: { name?: string };
@@ -199,6 +213,7 @@ async function validateCliContract(): Promise<{
   return {
     commands,
     workspace: true,
+    workspaceControlPlane: true,
     inspect: true,
     claimIdle: true,
     chronicleSetup: true,

@@ -60,6 +60,7 @@ await copyDocs([
   "docs/IOS.md",
   "docs/SECURITY.md",
   "docs/RELEASING.md",
+  "docs/PERSONAL_FORK.md",
   "CHANGELOG.md",
   "RUNBOOK.md",
   "CAPABILITY_MAP.md",

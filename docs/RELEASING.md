@@ -58,9 +58,10 @@ Compatibility rules:
 8. Publish the release when the artifacts look correct.
 
 Personal fork prereleases use a fork-specific SemVer identifier such as
-`0.3.0-keeling.1`. Promote only from the deployable integration branch after testing a restored
-copy of the live runtime. Keep the prior package/data pair, export the migrated runtime before a
-rollback rehearsal, and restore compatible binary/data pairs together. See
+`0.3.0-keeling.1`. Promote and tag them from the deployable `life-control-plane` branch, not the
+upstream-aligned `main`, after testing a restored copy of the live runtime. Keep the prior
+package/data pair, export the migrated runtime before a rollback rehearsal, and restore compatible
+binary/data pairs together. See
 `docs/PERSONAL_FORK.md` for deliberate upstream intake and contribution extraction.
 
 ## Artifacts
@@ -82,6 +83,7 @@ Each archive contains:
 - `CONTRIBUTING.md`
 - `LICENSE`
 - install, agent, data, security, and releasing docs
+- personal-fork maintenance policy
 - runbook and capability map
 - `manifest.json`
 

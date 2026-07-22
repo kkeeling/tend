@@ -5,6 +5,8 @@ a promise of ongoing maintenance.
 
 ## Unreleased
 
+## 0.3.0-keeling.6 - 2026-07-22
+
 - Separate local card dismissal from source cleanup. `tend cli card:dismiss` now moves a reviewable
   card to `done` with no work item, approval digest, `action:verify`, or connector call, and is
   reversible with `card:return-to-review`. Explicit source cleanup moves to
@@ -15,7 +17,17 @@ a promise of ongoing maintenance.
   `dismissed`); legacy cards without it are treated as `completed`.
 - Add the local `dismiss` mobile command kind (new Supabase migration `202607130001`) mirrored
   across the shared types, mobile projection, Swift models, and iOS controls, swipes, and activity.
-- Advance the CLI contract to `0.4` with the clearer, intentionally breaking card disposition names.
+- Add owner-feed reconciliation for cross-feed signals, versioned commitment re-homing, typed
+  completion evidence, and source edit/deletion/retraction handling without losing provenance.
+- Rank urgent reply, decision, and deadline cards alongside commitments with replayable judgment
+  metadata; bind KTD15 auto-creation to a frozen, privacy-reviewed fixture and exact model/recipe.
+- Recheck connector-verification freshness immediately before an approved external mutation, and
+  require the local read token plus same-origin checks for aggregated workspace HTTP reads.
+- Keep SQLite authoritative across failed mirror writes, redact source-attempt errors, preserve the
+  exact iMessage watermark on no-change, and record no-change checkpoints honestly.
+- Package the personal-fork policy and exercise the life-control-plane CLI in native smoke tests.
+- Advance the CLI contract to `0.6` for the additive commitment evidence, signal-change, and
+  re-homing commands.
 
 ## 0.3.0-keeling.5 - 2026-07-21
 
