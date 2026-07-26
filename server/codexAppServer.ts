@@ -5,7 +5,7 @@ import path from "node:path";
 declare const Bun: {
   spawn(command: string[], options?: Record<string, unknown>): {
     exited: Promise<number>;
-    kill(signal?: number): void;
+    kill(signal?: number | NodeJS.Signals): void;
     stdin: { write(chunk: string): unknown; flush?: () => unknown; end(): unknown };
     stdout: ReadableStream<Uint8Array> | null;
     stderr: ReadableStream<Uint8Array> | null;
@@ -13,6 +13,8 @@ declare const Bun: {
 };
 
 export const DEFAULT_CONTROL_SOCKET = path.join(os.homedir(), ".codex", "app-server-control", "app-server-control.sock");
+const DEFAULT_TERMINATION_GRACE_MS = 2_000;
+const DEFAULT_STREAM_DRAIN_GRACE_MS = 500;
 
 export interface AppServerDrainOptions {
   threadId: string;
@@ -21,13 +23,21 @@ export interface AppServerDrainOptions {
   writableRoots?: string[];
   controlSocket?: string | null;
   timeoutMs?: number;
+  signal?: AbortSignal;
   log?: (line: string) => void | Promise<void>;
   argv?: string[];
+  terminationGraceMs?: number;
+  streamDrainGraceMs?: number;
 }
 
 interface Pending {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+}
+
+interface StreamPump {
+  completed: Promise<void>;
+  cancel(): void;
 }
 
 export function appServerArgv(controlSocket: string | null | undefined): string[] {
@@ -40,7 +50,15 @@ export async function runAppServerDrain(options: AppServerDrainOptions): Promise
   const log = options.log ?? (() => {});
   const timeoutMs = options.timeoutMs ?? Number(process.env.ATTENTION_DRAIN_TIMEOUT_MS ?? 15 * 60_000);
   const argv = options.argv ?? appServerArgv(options.controlSocket);
+  if (options.signal?.aborted) {
+    await log("[app-server] drain cancelled before launch");
+    return 1;
+  }
   await log(`[app-server] launching: ${argv.join(" ")}`);
+  if (options.signal?.aborted) {
+    await log("[app-server] drain cancelled before launch");
+    return 1;
+  }
 
   const child = Bun.spawn(argv, { cwd: options.cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   const pending = new Map<number, Pending>();
@@ -52,12 +70,9 @@ export async function runAppServerDrain(options: AppServerDrainOptions): Promise
     if (settled) return;
     settled = true;
     exitCode = code;
-    void log(`[app-server] ${reason}`);
-    try {
-      child.kill();
-    } catch {
-      // Already gone.
-    }
+    for (const entry of pending.values()) entry.reject(new Error(reason));
+    pending.clear();
+    void Promise.resolve(log(`[app-server] ${reason}`)).catch(() => {});
   };
 
   const send = (message: Record<string, unknown>) => {
@@ -80,63 +95,86 @@ export async function runAppServerDrain(options: AppServerDrainOptions): Promise
     send({ id, result } as Record<string, unknown>);
   };
 
-  const pipeStderr = (async () => {
-    if (!child.stderr) return;
-    const decoder = new TextDecoder();
-    for await (const chunk of child.stderr as unknown as AsyncIterable<Uint8Array>) {
-      await log(`[app-server:err] ${decoder.decode(chunk).trimEnd()}`);
-    }
-  })();
+  const stderrDecoder = new TextDecoder();
+  const logStderr = async (text: string) => {
+    text = text.trimEnd();
+    if (text) await log(`[app-server:err] ${text}`);
+  };
+  const pipeStderr = startStreamPump(
+    child.stderr,
+    (chunk) => logStderr(stderrDecoder.decode(chunk, { stream: true })),
+    () => logStderr(stderrDecoder.decode()),
+  );
 
-  const turnDone = new Promise<void>((resolveTurn) => {
-    void (async () => {
-      if (!child.stdout) return;
-      const decoder = new TextDecoder();
-      let buffer = "";
-      for await (const chunk of child.stdout as unknown as AsyncIterable<Uint8Array>) {
-        buffer += decoder.decode(chunk);
-        let newline = buffer.indexOf("\n");
-        while (newline >= 0) {
-          const line = buffer.slice(0, newline).trim();
-          buffer = buffer.slice(newline + 1);
-          newline = buffer.indexOf("\n");
-          if (!line) continue;
-          let message: Record<string, unknown>;
-          try {
-            message = JSON.parse(line) as Record<string, unknown>;
-          } catch {
-            await log(`[app-server:raw] ${line.slice(0, 400)}`);
-            continue;
-          }
-          if (message.id !== undefined && message.method === undefined) {
-            const entry = pending.get(message.id as number);
-            if (!entry) continue;
-            pending.delete(message.id as number);
-            if (message.error !== undefined) entry.reject(new Error(JSON.stringify(message.error).slice(0, 500)));
-            else entry.resolve(message.result);
-            continue;
-          }
-          if (message.id !== undefined && typeof message.method === "string") {
-            answerServerRequest(message.id, message.method);
-            continue;
-          }
-          if (message.method === "turn/completed") {
-            const params = message.params as { threadId?: string; turn?: { status?: string } } | undefined;
-            if (params?.threadId === options.threadId) {
-              const status = params.turn?.status ?? "unknown";
-              finish(status === "completed" ? 0 : 1, `turn finished with status ${status}`);
-              resolveTurn();
-            }
-          }
-        }
+  let resolveTurn!: () => void;
+  const turnDone = new Promise<void>((resolve) => {
+    resolveTurn = resolve;
+  });
+  let stdoutBuffer = "";
+  const handleStdoutLine = async (line: string) => {
+    line = line.trim();
+    if (!line) return;
+    let message: Record<string, unknown>;
+    try {
+      message = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      await log(`[app-server:raw] ${line.slice(0, 400)}`);
+      return;
+    }
+    if (message.id !== undefined && message.method === undefined) {
+      const entry = pending.get(message.id as number);
+      if (!entry) return;
+      pending.delete(message.id as number);
+      if (message.error !== undefined) entry.reject(new Error(JSON.stringify(message.error).slice(0, 500)));
+      else entry.resolve(message.result);
+      return;
+    }
+    if (message.id !== undefined && typeof message.method === "string") {
+      answerServerRequest(message.id, message.method);
+      return;
+    }
+    if (message.method === "turn/completed") {
+      const params = message.params as { threadId?: string; turn?: { status?: string } } | undefined;
+      if (params?.threadId === options.threadId) {
+        const status = params.turn?.status ?? "unknown";
+        finish(status === "completed" ? 0 : 1, `turn finished with status ${status}`);
+        resolveTurn();
       }
-      resolveTurn();
-    })();
+    }
+  };
+  const stdoutDecoder = new TextDecoder();
+  const consumeStdout = async (text: string, flush = false) => {
+    stdoutBuffer += text;
+    let newline = stdoutBuffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = stdoutBuffer.slice(0, newline);
+      stdoutBuffer = stdoutBuffer.slice(newline + 1);
+      await handleStdoutLine(line);
+      newline = stdoutBuffer.indexOf("\n");
+    }
+    if (flush && stdoutBuffer) {
+      const finalLine = stdoutBuffer;
+      stdoutBuffer = "";
+      await handleStdoutLine(finalLine);
+    }
+  };
+  const pipeStdout = startStreamPump(
+    child.stdout,
+    (chunk) => consumeStdout(stdoutDecoder.decode(chunk, { stream: true })),
+    () => consumeStdout(stdoutDecoder.decode(), true),
+  );
+  void pipeStdout.completed.then(resolveTurn, resolveTurn);
+  void child.exited.then((code) => {
+    if (!settled) finish(1, `app-server exited with code ${code} before the turn completed`);
+    resolveTurn();
   });
 
   const timeout = setTimeout(() => {
     finish(1, `drain timed out after ${Math.round(timeoutMs / 1000)}s`);
   }, timeoutMs);
+  const abort = () => finish(1, "drain cancelled during Tend shutdown");
+  options.signal?.addEventListener("abort", abort, { once: true });
+  if (options.signal?.aborted) abort();
 
   try {
     await request("initialize", { clientInfo: { name: "tend_dispatcher", title: "Tend auto-drain", version: "0.1.0" } });
@@ -163,19 +201,84 @@ export async function runAppServerDrain(options: AppServerDrainOptions): Promise
     finish(1, `protocol failure: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abort);
     try {
       child.stdin.end();
     } catch {
       // Already closed.
     }
-    try {
-      child.kill();
-    } catch {
-      // Already gone.
-    }
-    await Promise.race([child.exited, new Promise((resolve) => setTimeout(resolve, 2_000))]);
-    await pipeStderr.catch(() => {});
+    const terminationGraceMs = options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
+    const streamDrainGraceMs = options.streamDrainGraceMs ?? DEFAULT_STREAM_DRAIN_GRACE_MS;
+    await terminateChild(child, terminationGraceMs);
+    pipeStdout.cancel();
+    pipeStderr.cancel();
+    await settleWithin(
+      Promise.allSettled([pipeStdout.completed, pipeStderr.completed]).then(() => undefined),
+      streamDrainGraceMs,
+    );
     if (!settled) finish(1, "app-server exited before the turn completed");
   }
   return exitCode;
+}
+
+function startStreamPump(
+  stream: ReadableStream<Uint8Array> | null,
+  consume: (chunk: Uint8Array) => void | Promise<void>,
+  flush?: () => void | Promise<void>,
+): StreamPump {
+  if (!stream) return { completed: Promise.resolve(), cancel() {} };
+  const reader = stream.getReader();
+  const completed = (async () => {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          await flush?.();
+          return;
+        }
+        await consume(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  })();
+  return {
+    completed,
+    cancel() {
+      void reader.cancel().catch(() => {});
+    },
+  };
+}
+
+async function terminateChild(
+  child: ReturnType<typeof Bun.spawn>,
+  graceMs: number,
+): Promise<void> {
+  if (await settleWithin(child.exited, 0)) return;
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    // Already gone.
+  }
+  if (await settleWithin(child.exited, graceMs)) return;
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // Already gone.
+  }
+  await settleWithin(child.exited, graceMs);
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true, () => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

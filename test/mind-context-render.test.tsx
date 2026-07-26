@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { OnYourMindContent } from "../src/mind/OnYourMindPage";
+import { MindRefreshStatus, OnYourMindContent } from "../src/mind/OnYourMindPage";
 import type { MindContextWorkspace } from "../shared/types";
 
 test("renders a fresh On Your Mind workspace with excerpts and expandable filtered OCR", () => {
@@ -57,9 +57,10 @@ test("renders a fresh On Your Mind workspace with excerpts and expandable filter
     }],
   };
 
-  const html = renderToStaticMarkup(<OnYourMindContent workspace={workspace} />);
+  const html = renderToStaticMarkup(<OnYourMindContent workspace={workspace} busy />);
 
   expect(html).toContain("On Your Mind");
+  expect(html).toContain('aria-busy="true"');
   expect(html).toContain("Changed now");
   expect(html).toContain("Investigating mobile CTA visibility");
   expect(html).toContain("Full filtered window");
@@ -69,6 +70,24 @@ test("renders a fresh On Your Mind workspace with excerpts and expandable filter
   expect(html).toContain("Show 1 more source observation");
   expect(html).not.toContain("Excerpt four.");
   expect(html).toContain('href="/mind/mind-current"');
+});
+
+test("distinguishes query failures from realtime reconnection and exposes retry state", () => {
+  const failed = renderToStaticMarkup(
+    <MindRefreshStatus error={new Error("Mind context request timed out")} busy onRetry={() => {}} />,
+  );
+  expect(failed).toContain('role="alert"');
+  expect(failed).toContain("Mind context request timed out");
+  expect(failed).toContain("Refreshing…");
+  expect(failed).toContain("disabled");
+  expect(failed).not.toContain("while Tend reconnects");
+
+  const reconnecting = renderToStaticMarkup(
+    <MindRefreshStatus busy={false} onRetry={() => {}} />,
+  );
+  expect(reconnecting).toContain('role="status"');
+  expect(reconnecting).toContain("while Tend reconnects");
+  expect(reconnecting).toContain(">Retry<");
 });
 
 test("labels a card-linked historical pulse without presenting it as current", () => {

@@ -97,6 +97,7 @@ export class MirroredSourceRepository implements SourceRepository {
     private readonly primary: SourceRepository,
     private readonly mirror: SourceRepository,
     private readonly mirrorWrites?: MirrorWriteCoordinator,
+    private readonly primaryAuthoritative = false,
   ) {}
 
   async init(feedIds: string[]): Promise<void> {
@@ -143,9 +144,11 @@ export class MirroredSourceRepository implements SourceRepository {
     const primaryIds = new Set(primary.map((record) => record.recipe.id));
     const mirrorIds = new Set(mirror.map((record) => record.recipe.id));
     for (const record of mirror.filter((item) => !primaryIds.has(item.recipe.id))) {
-      await this.primary.write(feedId, record.recipe, record.content, record.checkpoint);
+      if (this.primaryAuthoritative) await this.mirror.remove(feedId, record.recipe.id);
+      else await this.primary.write(feedId, record.recipe, record.content, record.checkpoint);
     }
-    for (const record of primary.filter((item) => !mirrorIds.has(item.recipe.id))) {
+    for (const record of primary.filter((item) =>
+      this.primaryAuthoritative || !mirrorIds.has(item.recipe.id))) {
       await this.mirror.write(feedId, record.recipe, record.content, record.checkpoint);
     }
   }

@@ -43,7 +43,11 @@ export class FileTextDocumentRepository implements TextDocumentRepository {
 }
 
 export class MirroredTextDocumentRepository implements TextDocumentRepository {
-  constructor(private readonly primary: TextDocumentRepository, private readonly mirror: TextDocumentRepository) {}
+  constructor(
+    private readonly primary: TextDocumentRepository,
+    private readonly mirror: TextDocumentRepository,
+    private readonly primaryAuthoritative = false,
+  ) {}
 
   async init(): Promise<void> {
     await this.mirror.init();
@@ -69,11 +73,20 @@ export class MirroredTextDocumentRepository implements TextDocumentRepository {
 
   private async syncSeed(seed: TextDocumentSeed): Promise<void> {
     const [primaryHas, mirrorHas] = await Promise.all([this.primary.has(seed.key), this.mirror.has(seed.key)]);
-    if (!primaryHas && mirrorHas) {
+    if (!primaryHas && mirrorHas && !this.primaryAuthoritative) {
       await this.primary.write(seed.key, await this.mirror.read(seed.key));
       return;
     }
+    if (!primaryHas && mirrorHas) {
+      await this.primary.write(seed.key, seed.content);
+      await this.mirror.write(seed.key, seed.content);
+      return;
+    }
     if (primaryHas && !mirrorHas) {
+      await this.mirror.write(seed.key, await this.primary.read(seed.key));
+      return;
+    }
+    if (primaryHas && mirrorHas && this.primaryAuthoritative) {
       await this.mirror.write(seed.key, await this.primary.read(seed.key));
       return;
     }

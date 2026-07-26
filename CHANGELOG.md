@@ -5,6 +5,42 @@ a promise of ongoing maintenance.
 
 ## Unreleased
 
+- Split one-time runtime bootstrap and mirror reconciliation from steady-state CLI opens, so
+  automation commands no longer recursively harden thousands of files, rerun migrations, rewrite
+  mirrors, or checkpoint the WAL before and after every operation.
+- Make workspace reads pure and slice-specific, propagate browser cancellation into fetch, and
+  coalesce realtime bursts into one active plus one trailing refresh. Realtime SSE changes now
+  wake and flush immediately instead of waiting for the stream heartbeat.
+- Keep last-known Now and On Your Mind content visible during reconnects, pause card edits and
+  mutations until canonical state is current, rotate stale local read tokens after service
+  restarts, and preserve uncertain-action locks across route changes.
+- Acquire the HTTP listener before background workers, await worker shutdown, close SQLite on every
+  lifecycle exit, and treat a stalled live-status probe as a bounded terminal failure.
+- Retry failed scheduled-priority refreshes, reconcile realtime cursors atomically, batch
+  source-attempt coverage reads with per-source windows, and serialize service startup against
+  runtime replacement.
+- Advance priority scheduling only for scheduling-relevant card, commitment, and rule changes;
+  snapshot independent realtime cursors concurrently and keep non-priority doorbells from
+  re-querying the next boundary.
+- Abort stalled mobile cloud requests during bounded shutdown, scan drain-eligible feeds with
+  bounded concurrency, preserve split UTF-8 app-server output, and cap history rendering,
+  benchmark traversal, and automation-definition reads.
+- Stop mobile command application at every abort boundary, leave SQLite open if a worker cannot
+  confirm shutdown, atomically publish complete runtime-lock ownership, and preserve one durable
+  capability token across concurrent runtime claim handoffs.
+- Restore valid mirrors when the database is missing, recreate generation triggers after
+  migrations, rewrite stale mutable mirrors and remove mirror-only records during explicit repair,
+  recover deterministically from stale runtime locks, and keep startup signal cleanup from wedging
+  later launches.
+- Preserve dirty card edits and unsent instructions across refreshes, expose durable remediation
+  after ambiguous or stale actions, and make Now and On Your Mind accessibility state reflect
+  canonical loading, reconnect, and error conditions.
+- Keep actions gated until SSE-triggered canonical refreshes succeed, retain every unresolved draft,
+  and await query cancellation before the one trailing realtime refresh begins.
+- Add a live-profiled synthetic runtime benchmark and subprocess regressions for occupied ports,
+  stalled status sockets, pure reads, immediate SSE delivery, and in-flight worker cleanup.
+- Upgrade Hono to a production-audit-clean release.
+
 ## 0.3.0-keeling.7 - 2026-07-22
 
 - Reuse a strictly verified, content-keyed signed iMessage helper across local prerelease builds

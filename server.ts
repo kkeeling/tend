@@ -5,12 +5,14 @@ import { AttentionDomain } from "./server/domain";
 import { apiRoutes } from "./server/routes/api";
 import { assetRoutes } from "./server/routes/assets";
 import { createRealtimeHub } from "./server/routes/realtime";
+import { startupResponse } from "./server/routes/startup";
 import { createFeedEventBridge } from "./server/realtime/feedEventBridge";
-import { createLocalRuntime, resolveArtifactsDir, resolveDataDir, resolveDbPath, resolveRuntimeRoot } from "./server/runtime";
+import { PriorityRefreshWorker } from "./server/priorityRefresh";
+import { openOrBootstrapLocalRuntime, resolveArtifactsDir, resolveDataDir, resolveDbPath, resolveRuntimeRoot } from "./server/runtime";
 import { DrainDispatcher } from "./server/dispatcher";
 import { loadMobileCloudEnvFile, mobileCloudConfigFromEnv, SupabaseMobileCloudClient } from "./server/mobile/client";
 import { MobileSyncWorker } from "./server/mobile/sync";
-import { configurePrivateProcessPermissions, makeToken } from "./server/util";
+import { acquireRuntimeReplacementLock, configurePrivateProcessPermissions, isRecord, makeToken } from "./server/util";
 
 declare const Bun: {
   serve(options: { port: number; hostname: string; idleTimeout: number; fetch: (...args: any[]) => any }): { stop(force?: boolean): void };
@@ -24,48 +26,171 @@ const clientDir = process.env.ATTENTION_CLIENT_DIR ?? path.join(root, "dist");
 const runtimeRoot = resolveRuntimeRoot(root);
 const artifactsDir = resolveArtifactsDir(root);
 const dataDir = resolveDataDir(root);
-const { sqlite, store } = await createLocalRuntime(dataDir, resolveDbPath(root));
-const domain = new AttentionDomain(store);
 const mutationToken = process.env.ATTENTION_MUTATION_TOKEN ?? makeToken();
 const realtime = createRealtimeHub();
-const feedEventBridge = createFeedEventBridge(store, realtime.notify);
-await feedEventBridge.start();
-const drainDispatcher = new DrainDispatcher(store, { appRoot: root, runtimeRoot });
-if (process.env.ATTENTION_AUTODRAIN === "1") drainDispatcher.start();
-const mobileConfig = mobileCloudConfigFromEnv();
-const mobileSync = mobileConfig
-  ? new MobileSyncWorker(store, domain, new SupabaseMobileCloudClient(mobileConfig))
-  : null;
-mobileSync?.start();
-const app = new Hono();
+let releaseRuntimeReplacementLock: (() => Promise<void>) | null = null;
+let pendingRuntimeReplacementLock: Promise<() => Promise<void>> | null = null;
+let fetchHandler: (...args: any[]) => any = (request: Request) => startupResponse(request);
+let server: ReturnType<typeof Bun.serve> | null = null;
+let sqlite: Awaited<ReturnType<typeof openOrBootstrapLocalRuntime>>["sqlite"] | null = null;
+let priorityRefresh: PriorityRefreshWorker | null = null;
+let feedEventBridge: ReturnType<typeof createFeedEventBridge> | null = null;
+let drainDispatcher: DrainDispatcher | null = null;
+let mobileSync: MobileSyncWorker | null = null;
+let closePromise: Promise<void> | null = null;
 
-app.route("/", apiRoutes({
-  artifactsDir,
-  dataDir,
-  domain,
-  mobileStatus: () => mobileSync?.currentStatus() ?? { enabled: false },
-  mutationToken,
-  notify: realtime.notify,
-  port,
-  root,
-  sqlite,
-  store,
-}));
-app.route("/", realtime.routes());
-app.route("/", assetRoutes(clientDir));
+async function releaseReplacementLock(): Promise<void> {
+  let release = releaseRuntimeReplacementLock;
+  releaseRuntimeReplacementLock = null;
+  if (!release && pendingRuntimeReplacementLock) {
+    const pending = pendingRuntimeReplacementLock;
+    pendingRuntimeReplacementLock = null;
+    release = await pending;
+  }
+  await release?.();
+}
 
-const server = Bun.serve({
-  port,
-  hostname: "127.0.0.1",
-  idleTimeout: 255,
-  fetch: app.fetch,
-});
+export function closeServer(): Promise<void> {
+  if (closePromise) return closePromise;
+  closePromise = (async () => {
+    const failures: unknown[] = [];
+    try {
+      server?.stop(true);
+    } catch (error) {
+      failures.push(error);
+    }
+    const results = await Promise.allSettled([
+      mobileSync?.stop(),
+      drainDispatcher?.stop(),
+      feedEventBridge?.stop(),
+      priorityRefresh?.stop(),
+    ]);
+    failures.push(...results.flatMap((result) => result.status === "rejected" ? [result.reason] : []));
+    if (results.every((result) => result.status === "fulfilled")) {
+      try {
+        sqlite?.close();
+      } catch (error) {
+        failures.push(error);
+      }
+    } else {
+      failures.push(new Error("SQLite was deliberately left open because a background worker did not confirm shutdown."));
+    }
+    try {
+      await releaseReplacementLock();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length) throw new AggregateError(failures, "Tend shutdown did not cleanly release every resource.");
+  })();
+  return closePromise;
+}
+
+process.once("SIGINT", closeForSignal);
+process.once("SIGTERM", closeForSignal);
+
+try {
+  server = Bun.serve({
+    port,
+    hostname: "127.0.0.1",
+    idleTimeout: 255,
+    fetch: (...args: any[]) => fetchHandler(...args),
+  });
+} catch {
+  throw new Error(`Tend cannot start because 127.0.0.1:${port} is already in use.`);
+}
+
+try {
+  const pendingReplacementLock = acquireRuntimeReplacementLock(runtimeRoot);
+  pendingRuntimeReplacementLock = pendingReplacementLock;
+  const acquiredReplacementLock = await pendingReplacementLock;
+  if (pendingRuntimeReplacementLock !== pendingReplacementLock) {
+    throw new Error("Tend shutdown interrupted runtime replacement-lock acquisition.");
+  }
+  pendingRuntimeReplacementLock = null;
+  releaseRuntimeReplacementLock = acquiredReplacementLock;
+  const runtime = await openOrBootstrapLocalRuntime(dataDir, resolveDbPath(root));
+  sqlite = runtime.sqlite;
+  const { store } = runtime;
+  const domain = new AttentionDomain(store);
+  await domain.refreshWorkspacePriorities();
+
+  const notifyRealtime = (data: unknown) => {
+    realtime.notify(data);
+    if (isRecord(data) && data.priorityScheduleChanged === true) {
+      void priorityRefresh?.requestSchedule();
+    }
+  };
+  const notifyCommittedMutation = async (data: unknown) => {
+    try {
+      if (!feedEventBridge) {
+        realtime.notify(data);
+        void priorityRefresh?.requestSchedule();
+        return;
+      }
+      // The durable cursor bridge is the authority for HTTP, scheduled, and
+      // out-of-process mutations. Synchronizing it here prevents its interval
+      // from echoing a second doorbell for the same committed generation.
+      await feedEventBridge.requestPoll();
+    } catch (error) {
+      // A committed mutation must not look failed just because its wake-up snapshot
+      // failed. Wake the browser directly and let the interval reconcile the cursor.
+      console.error("[realtime] immediate durable cursor sync failed:", error);
+      realtime.notify({ ...(isRecord(data) ? data : {}), source: "mutation-fallback" });
+      void priorityRefresh?.requestSchedule();
+    }
+  };
+  priorityRefresh = new PriorityRefreshWorker(domain, notifyCommittedMutation, {
+    onError: (error) => console.error("[priority-refresh] scheduling failed; retrying:", error),
+  });
+  feedEventBridge = createFeedEventBridge(store, notifyRealtime, {
+    onError: (error) => console.error("[realtime] durable cursor poll failed:", error),
+  });
+  drainDispatcher = new DrainDispatcher(store, { appRoot: root, runtimeRoot });
+  const mobileConfig = mobileCloudConfigFromEnv();
+  mobileSync = mobileConfig
+    ? new MobileSyncWorker(store, domain, new SupabaseMobileCloudClient(mobileConfig))
+    : null;
+  const app = new Hono();
+
+  app.route("/", apiRoutes({
+    artifactsDir,
+    dataDir,
+    domain,
+    mobileStatus: () => mobileSync?.currentStatus() ?? { enabled: false },
+    mutationToken,
+    notify: notifyCommittedMutation,
+    port,
+    root,
+    sqlite,
+    store,
+  }));
+  app.route("/", realtime.routes());
+  app.route("/", assetRoutes(clientDir));
+
+  await feedEventBridge.start();
+  await priorityRefresh.start();
+  if (process.env.ATTENTION_AUTODRAIN === "1") drainDispatcher.start();
+  mobileSync?.start();
+  fetchHandler = app.fetch;
+  await releaseReplacementLock();
+} catch (error) {
+  await releaseReplacementLock();
+  try {
+    await closeServer();
+  } catch (cleanupError) {
+    throw new AggregateError([error, cleanupError], "Tend startup and cleanup both failed.");
+  }
+  throw error;
+}
 
 console.log(`Tend API listening on http://127.0.0.1:${port}`);
 
-export function closeServer() {
-  mobileSync?.stop();
-  drainDispatcher.stop();
-  feedEventBridge.stop();
-  server.stop(true);
+function closeForSignal(): void {
+  void closeServer().then(
+    () => process.exit(0),
+    (error) => {
+      console.error("[shutdown] cleanup failed:", error);
+      process.exit(1);
+    },
+  );
 }

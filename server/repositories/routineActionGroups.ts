@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import type { RoutineActionGroup } from "../../shared/types";
 import { readJson, writeJson } from "../util";
@@ -11,6 +11,7 @@ export interface RoutineActionGroupRepository {
   get(feedId: string, groupId: string): Promise<RoutineActionGroup>;
   has(feedId: string, groupId: string): Promise<boolean>;
   write(group: RoutineActionGroup): Promise<void>;
+  remove?(feedId: string, groupId: string): Promise<void>;
 }
 
 export class FileRoutineActionGroupRepository implements RoutineActionGroupRepository {
@@ -37,6 +38,10 @@ export class FileRoutineActionGroupRepository implements RoutineActionGroupRepos
     await writeJson(this.groupFile(group.feedId, group.id), group);
   }
 
+  async remove(feedId: string, groupId: string): Promise<void> {
+    await rm(this.groupFile(feedId, groupId), { force: true });
+  }
+
   private groupPath(feedId: string): string {
     return path.join(this.dataDir, "feeds", feedId, "routine-actions");
   }
@@ -51,6 +56,7 @@ export class MirroredRoutineActionGroupRepository implements RoutineActionGroupR
     private readonly primary: RoutineActionGroupRepository,
     private readonly mirror: RoutineActionGroupRepository,
     private readonly mirrorWrites?: MirrorWriteCoordinator,
+    private readonly primaryAuthoritative = false,
   ) {}
 
   async init(feedIds: string[]): Promise<void> {
@@ -81,8 +87,14 @@ export class MirroredRoutineActionGroupRepository implements RoutineActionGroupR
     const primary = await this.primary.list(feedId);
     const mirror = await this.mirror.list(feedId);
     const primaryIds = new Set(primary.map((group) => group.id));
-    for (const group of mirror.filter((item) => !primaryIds.has(item.id))) {
-      await this.primary.write(group);
+    if (!this.primaryAuthoritative) {
+      for (const group of mirror.filter((item) => !primaryIds.has(item.id))) {
+        await this.primary.write(group);
+      }
+    } else if (this.mirror.remove) {
+      for (const group of mirror.filter((item) => !primaryIds.has(item.id))) {
+        await this.mirror.remove(feedId, group.id);
+      }
     }
     for (const group of primary) {
       await this.mirror.write(group);

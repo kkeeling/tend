@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { runTendCli } from "../server/cli";
 import { CLI_COMMANDS, INTERNAL_CLI_COMMANDS, cliCommandName } from "../server/cli/contract";
 import { MissingFlagError, formatCliError } from "../server/cli/errors";
-import { assertCliRuntimeMatchesLive } from "../server/cli/runtimeGuard";
+import { assertCliRuntimeMatchesLive, fetchLiveStatus } from "../server/cli/runtimeGuard";
 import { setupChroniclePrompt, setupCodexPrompt } from "../server/cli/setup";
+import { createLocalRuntime } from "../server/runtime";
 
 describe("CLI contract", () => {
   test("keeps public help focused on the v0 agent surface", () => {
@@ -106,7 +109,7 @@ describe("CLI contract", () => {
   });
 
   test("refuses an implicit CLI runtime that differs from the running service", async () => {
-    const mismatch = assertCliRuntimeMatchesLive("card:upsert", "/tmp/quiet-runtime", {
+    const mismatch = assertCliRuntimeMatchesLive("/tmp/quiet-runtime", {
       fetchStatus: async () => ({ dataDir: "/tmp/live-runtime/data" }),
     });
     await expect(mismatch).rejects.toMatchObject({
@@ -114,10 +117,60 @@ describe("CLI contract", () => {
       hint: "Run the CLI from the canonical checkout or set ATTENTION_HOME explicitly for isolated validation.",
     });
 
-    await expect(assertCliRuntimeMatchesLive("card:upsert", "/tmp/quiet-runtime", {
+    await expect(assertCliRuntimeMatchesLive("/tmp/quiet-runtime", {
       explicitRuntime: true,
       fetchStatus: async () => ({ dataDir: "/tmp/live-runtime/data" }),
     })).resolves.toBeUndefined();
+  });
+
+  test("treats a stalled live status probe as a bounded terminal failure", async () => {
+    const sockets = new Set<import("node:net").Socket>();
+    const server = createServer((socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Expected a TCP test port.");
+    const startedAt = performance.now();
+    try {
+      await expect(fetchLiveStatus(`http://127.0.0.1:${address.port}/api/status`, 50))
+        .rejects.toMatchObject({ code: "runtime_status_timeout" });
+      // The suite also runs CPU-heavy SQLite and React tests in parallel. Keep
+      // the externally meaningful one-second process-exit budget without
+      // mistaking scheduler contention for an unbounded status probe.
+      expect(performance.now() - startedAt).toBeLessThan(1_000);
+
+      const env = { ...process.env, ATTENTION_API_PORT: String(address.port) };
+      delete env.ATTENTION_HOME;
+      const subprocess = Bun.spawn({
+        cmd: [process.execPath, "tend.ts", "cli", "workspace:now"],
+        cwd: process.cwd(),
+        env,
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      const subprocessStartedAt = performance.now();
+      const timeout = Symbol("timeout");
+      const exitCode = await Promise.race([
+        subprocess.exited,
+        Bun.sleep(1_000).then(() => timeout),
+      ]);
+      if (exitCode === timeout) {
+        subprocess.kill("SIGTERM");
+        await subprocess.exited;
+      }
+      expect(exitCode).not.toBe(timeout);
+      expect(exitCode).not.toBe(0);
+      expect(performance.now() - subprocessStartedAt).toBeLessThan(1_000);
+      // The packaged process lifetime above is the authoritative leak check.
+      // Happy DOM replaces event globals for concurrent browser tests and can
+      // delay this in-process fixture's server-side `close` observation even
+      // after the client has force-reset its socket.
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   test("executes the renamed local-dismiss and source-cleanup commands end to end", async () => {
@@ -140,6 +193,8 @@ describe("CLI contract", () => {
     };
 
     try {
+      const runtime = await createLocalRuntime(path.join(home, "data"), path.join(home, "attention.db"));
+      runtime.sqlite.close();
       const card = {
         id: "cli-disposition",
         title: "Choose the disposition.",
@@ -168,6 +223,29 @@ describe("CLI contract", () => {
       expect(restored.completionDisposition).toBeUndefined();
     } finally {
       await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a mistyped explicit runtime refuses agent commands without creating state", async () => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), "tend-cli-mistyped-home-"));
+    const home = path.join(parent, "typo");
+    const subprocess = Bun.spawn({
+      cmd: [process.execPath, "tend.ts", "cli", "workspace:now"],
+      cwd: process.cwd(),
+      env: { ...process.env, ATTENTION_HOME: home },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      const [stderr, exitCode] = await Promise.all([
+        new Response(subprocess.stderr).text(),
+        subprocess.exited,
+      ]);
+      expect(exitCode).not.toBe(0);
+      expect(stderr).toContain("has not completed bootstrap");
+      expect(existsSync(home)).toBe(false);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
     }
   });
 });

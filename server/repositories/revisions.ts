@@ -70,7 +70,11 @@ export class FileRevisionRepository implements RevisionRepository {
 }
 
 export class MirroredRevisionRepository implements RevisionRepository {
-  constructor(private readonly primary: RevisionRepository, private readonly mirror: RevisionRepository) {}
+  constructor(
+    private readonly primary: RevisionRepository,
+    private readonly mirror: RevisionRepository,
+    private readonly primaryAuthoritative = false,
+  ) {}
 
   async init(feedIds: string[]): Promise<void> {
     await this.mirror.init(feedIds);
@@ -140,7 +144,12 @@ export class MirroredRevisionRepository implements RevisionRepository {
   private async syncById<T>(primary: T[], mirror: T[], id: (item: T) => string, writePrimary: (item: T) => Promise<void>, writeMirror: (item: T) => Promise<void>): Promise<void> {
     const primaryIds = new Set(primary.map(id));
     const mirrorIds = new Set(mirror.map(id));
-    for (const item of mirror.filter((candidate) => !primaryIds.has(id(candidate)))) await writePrimary(item);
-    for (const item of primary.filter((candidate) => !mirrorIds.has(id(candidate)))) await writeMirror(item);
+    if (!this.primaryAuthoritative) {
+      for (const item of mirror.filter((candidate) => !primaryIds.has(id(candidate)))) await writePrimary(item);
+    }
+    for (const item of primary.filter((candidate) =>
+      this.primaryAuthoritative || !mirrorIds.has(id(candidate)))) {
+      await writeMirror(item);
+    }
   }
 }

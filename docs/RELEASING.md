@@ -39,9 +39,11 @@ Compatibility rules:
    ```sh
    pnpm install --frozen-lockfile
    pnpm check
+   pnpm audit --prod
    pnpm build
    pnpm tend:build
    pnpm tend:smoke
+   pnpm bench:runtime
    pnpm tend:package
    ```
 
@@ -63,6 +65,14 @@ upstream-aligned `main`, after testing a restored copy of the live runtime. Keep
 package/data pair, export the migrated runtime before a rollback rehearsal, and restore compatible
 binary/data pairs together. See
 `docs/PERSONAL_FORK.md` for deliberate upstream intake and contribution extraction.
+
+Before a personal live cutover, export an owner-only backup outside synchronized folders and verify
+its manifest. Record the composite source revision plus archive and executable SHA-256 digests,
+install that exact archive, and verify `version`, `health`, schema/readiness, packaged smoke, and
+runtime benchmark results from the installed binary. If a versioned executable path changes, update
+every Tend automation only after the installed health check passes, then verify each definition
+still names its exact feed and home task. Retain the previous binary with its pre-migration backup
+as one rollback pair.
 
 ## Artifacts
 

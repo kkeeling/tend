@@ -56,7 +56,7 @@ import { appendPrivateText, digest, ensurePrivateDirectory, isoNow, makeId, read
 import { evaluateAttentionPriority, PRIORITY_RECIPE_DIGEST } from "./workflow/priority";
 import { defaultDictationCapability } from "./monologue";
 import { FileCardRepository, type CardRepository } from "./repositories/cards";
-import { FileFeedEventRepository, type FeedEventRepository } from "./repositories/feedEvents";
+import { feedEventCursor, FileFeedEventRepository, type FeedEventRepository } from "./repositories/feedEvents";
 import { FileMindContextRepository, type MindContextRepository } from "./repositories/mindContext";
 import { FileMobileCommandReceiptRepository, type MobileCommandReceiptRepository } from "./repositories/mobileCommandReceipts";
 import { FileRevisionRepository, type RevisionRepository } from "./repositories/revisions";
@@ -75,7 +75,7 @@ import { FilePriorityRuleRepository, type PriorityRuleRepository } from "./repos
 import { FilePriorityLedgerRepository, type PriorityLedgerRepository } from "./repositories/priorityLedger";
 import { FileWorkspaceNowProjectionRepository, type WorkspaceNowProjectionRepository } from "./repositories/workspaceNowProjection";
 import type { MobileCommandReceipt } from "../shared/mobile";
-import { projectCoverage } from "./workflow/coverage";
+import { isCoverageQualifyingAttempt, projectCoverage } from "./workflow/coverage";
 
 export const GLOBAL_PROMPT_NAMES = ["judge.md", "compose-card.md", "execute-work.md", "distill-policy.md", "compound.md"] as const;
 export const FEED_PROMPT_NAMES = ["judge.md", "compose-card.md"] as const;
@@ -133,9 +133,34 @@ export class AttentionStore {
   private readonly workspaceCommitments: WorkspaceCommitmentRepository;
   private readonly workspaceNowProjection: WorkspaceNowProjectionRepository;
   private readonly runAtomic?: AtomicRunner;
+  private readonly markPriorityScheduleChanged?: () => void;
+  private readonly readPriorityScheduleGeneration?: () => string;
   private readonly agentWakeSeq = new Map<AgentPresence["agent"], number>();
 
-  constructor(dataDir: string, options: { cards?: CardRepository; commitmentCandidates?: CommitmentCandidateRepository; commitmentEvents?: CommitmentEventRepository; events?: FeedEventRepository; mindContext?: MindContextRepository; mobileCommandReceipts?: MobileCommandReceiptRepository; priorityLedger?: PriorityLedgerRepository; priorityRules?: PriorityRuleRepository; revisions?: RevisionRepository; routineActionGroups?: RoutineActionGroupRepository; sourceAttempts?: SourceAttemptRepository; sourceRuns?: SourceRunRepository; sources?: SourceRepository; sweeps?: SweepRepository; textDocuments?: TextDocumentRepository; workItems?: WorkItemRepository; workspaceCommitments?: WorkspaceCommitmentRepository; workspaceFeeds?: WorkspaceFeedRepository; workspaceNowProjection?: WorkspaceNowProjectionRepository; runAtomic?: AtomicRunner } = {}) {
+  constructor(dataDir: string, options: {
+    cards?: CardRepository;
+    commitmentCandidates?: CommitmentCandidateRepository;
+    commitmentEvents?: CommitmentEventRepository;
+    events?: FeedEventRepository;
+    markPriorityScheduleChanged?: () => void;
+    mindContext?: MindContextRepository;
+    mobileCommandReceipts?: MobileCommandReceiptRepository;
+    priorityLedger?: PriorityLedgerRepository;
+    priorityRules?: PriorityRuleRepository;
+    readPriorityScheduleGeneration?: () => string;
+    revisions?: RevisionRepository;
+    routineActionGroups?: RoutineActionGroupRepository;
+    sourceAttempts?: SourceAttemptRepository;
+    sourceRuns?: SourceRunRepository;
+    sources?: SourceRepository;
+    sweeps?: SweepRepository;
+    textDocuments?: TextDocumentRepository;
+    workItems?: WorkItemRepository;
+    workspaceCommitments?: WorkspaceCommitmentRepository;
+    workspaceFeeds?: WorkspaceFeedRepository;
+    workspaceNowProjection?: WorkspaceNowProjectionRepository;
+    runAtomic?: AtomicRunner;
+  } = {}) {
     this.dataDir = dataDir;
     this.cards = options.cards ?? new FileCardRepository(this.dataDir);
     this.commitmentCandidates = options.commitmentCandidates ?? new FileCommitmentCandidateRepository(this.dataDir);
@@ -157,6 +182,8 @@ export class AttentionStore {
     this.workspaceCommitments = options.workspaceCommitments ?? new FileWorkspaceCommitmentRepository(this.dataDir);
     this.workspaceNowProjection = options.workspaceNowProjection ?? new FileWorkspaceNowProjectionRepository(this.dataDir);
     this.runAtomic = options.runAtomic;
+    this.markPriorityScheduleChanged = options.markPriorityScheduleChanged;
+    this.readPriorityScheduleGeneration = options.readPriorityScheduleGeneration;
   }
 
   async init(): Promise<void> {
@@ -199,7 +226,6 @@ export class AttentionStore {
   }
 
   async readWorkspace(feedId = "inbox"): Promise<WorkspaceView> {
-    await this.init();
     const feedIds = await this.workspaceFeeds.listFeedIds();
     const feeds = await Promise.all(feedIds.map(async (id) => {
       const config = await this.readConfig(id);
@@ -218,32 +244,67 @@ export class AttentionStore {
 
   async readWorkspaceCoverage(now = new Date()): Promise<WorkspaceCoverage> {
     const feedIds = await this.workspaceFeeds.listFeedIds();
-    const records = (await Promise.all(feedIds.map(async (feedId) =>
-      (await this.sources.list(feedId)).map(({ recipe }) => ({ feedId, recipe })),
-    ))).flat();
-    const attempts = (await Promise.all(feedIds.map((feedId) => this.sourceAttempts.list(feedId)))).flat();
+    const recordSets = await Promise.all(feedIds.map(async (feedId) => ({
+      feedId,
+      records: (await this.sources.list(feedId)).map(({ recipe }) => ({ feedId, recipe })),
+    })));
+    const records = recordSets.flatMap(({ records: feedRecords }) => feedRecords);
+    const recipes = new Map(records.map(({ feedId, recipe }) => [`${feedId}\u0000${recipe.id}`, recipe]));
+    const attemptSets = await Promise.all(recordSets.map(({ feedId, records: feedRecords }) => {
+      const sourceIds = feedRecords.map((record) => record.recipe.id);
+      return this.sourceAttempts.listForCoverage(
+        feedId,
+        sourceIds,
+        (attempt) => {
+          const recipe = recipes.get(`${attempt.feedId}\u0000${attempt.sourceId}`);
+          return Boolean(recipe && isCoverageQualifyingAttempt(recipe, attempt));
+        },
+      );
+    }));
+    const attempts = attemptSets.flat();
     return projectCoverage(records, attempts, now);
   }
 
   async readWorkspaceControlPlane(now = new Date()): Promise<WorkspaceControlPlane> {
+    const [surface, priority] = await Promise.all([
+      this.readWorkspaceNowSurface(now),
+      this.readWorkspacePriority(),
+    ]);
+    return { ...surface, priority };
+  }
+
+  async readWorkspaceNowSurface(
+    now = new Date(),
+  ): Promise<Pick<WorkspaceControlPlane, "now" | "coverage">> {
     const coverage = await this.readWorkspaceCoverage(now);
+    const workspaceNow = await this.readWorkspaceNow(now, coverage);
+    return { now: workspaceNow, coverage };
+  }
+
+  async readWorkspaceNow(
+    now = new Date(),
+    providedCoverage?: WorkspaceCoverage,
+  ): Promise<WorkspaceControlPlane["now"]> {
+    const coverage = providedCoverage ?? await this.readWorkspaceCoverage(now);
     const feedIds = await this.workspaceFeeds.listFeedIds();
-    const cardSets = await Promise.all(feedIds.map(async (feedId) => {
-      const config = await this.readConfig(feedId);
-      const cards = (await this.cards.list(feedId)).filter((card) =>
-        card.kind === "attention"
-        && card.status !== "done"
-        && card.readyForPass <= config.currentPass
-        && !card.sweep?.hidden,
-      );
-      return cards;
-    }));
+    const [cardSets, commitments, projection, activeRules] = await Promise.all([
+      Promise.all(feedIds.map(async (feedId) => {
+        const config = await this.readConfig(feedId);
+        const cards = (await this.cards.list(feedId)).filter((card) =>
+          card.kind === "attention"
+          && card.status !== "done"
+          && card.readyForPass <= config.currentPass
+          && !card.sweep?.hidden,
+        );
+        return cards;
+      })),
+      this.workspaceCommitments.list(),
+      this.workspaceNowProjection.list(),
+      this.priorityRules.active(),
+    ]);
     const cards = cardSets.flat();
-    const commitments = await this.workspaceCommitments.list();
     const commitmentById = new Map(commitments.map((item) => [item.id, item]));
-    const projection = await this.workspaceNowProjection.list();
     const priorityByCard = new Map(projection.map((row) => [row.id, row]));
-    const activeRules = await this.priorityRules.active();
     const statusScore: Record<Card["status"], number> = {
       approved_blocked: 750,
       working: 700,
@@ -303,23 +364,68 @@ export class AttentionStore {
 
     const allClear = ranked.length === 0 && coverage.allClear;
     return {
-      now: {
-        asOf: now.toISOString(),
-        allClear,
-        message: ranked.length
-          ? `${ranked.length} item${ranked.length === 1 ? " needs" : "s need"} attention.`
-          : allClear
-            ? "No attention items remain, and all required sources are coverage-complete."
-            : `No attention items are visible, but Tend cannot certify an all-clear. ${coverage.caveat}`,
-        items: ranked,
-      },
-      coverage,
-      priority: {
-        activeRules,
-        proposals: await this.priorityRules.listProposals(),
-        ledger: await this.priorityLedger.list(),
-      },
+      asOf: now.toISOString(),
+      allClear,
+      message: ranked.length
+        ? `${ranked.length} item${ranked.length === 1 ? " needs" : "s need"} attention.`
+        : allClear
+          ? "No attention items remain, and all required sources are coverage-complete."
+          : `No attention items are visible, but Tend cannot certify an all-clear. ${coverage.caveat}`,
+      items: ranked,
     };
+  }
+
+  async readWorkspacePriority(): Promise<WorkspaceControlPlane["priority"]> {
+    const [activeRules, proposals, ledger] = await Promise.all([
+      this.priorityRules.active(),
+      this.priorityRules.listProposals(),
+      this.priorityLedger.list(),
+    ]);
+    return {
+      activeRules,
+      proposals,
+      ledger,
+    };
+  }
+
+  async listVisibleAttentionPriorityDueDates(): Promise<string[]> {
+    const feedIds = await this.workspaceFeeds.listFeedIds();
+    const dueDateSets = await Promise.all(feedIds.map(async (feedId) => {
+      const [config, cards] = await Promise.all([
+        this.readConfig(feedId),
+        this.cards.list(feedId),
+      ]);
+      return cards
+        .filter((card) =>
+          card.kind === "attention"
+          && card.status !== "done"
+          && card.readyForPass <= config.currentPass
+          && !card.sweep?.hidden
+          && card.attentionPriority?.dueAt,
+        )
+        .map((card) => card.attentionPriority?.dueAt as string);
+    }));
+    return dueDateSets.flat();
+  }
+
+  async readPriorityScheduleCursor(): Promise<string> {
+    if (this.readPriorityScheduleGeneration) return this.readPriorityScheduleGeneration();
+    const [activeRules, commitments, attentionDueDates] = await Promise.all([
+      this.priorityRules.active(),
+      this.workspaceCommitments.list(),
+      this.listVisibleAttentionPriorityDueDates(),
+    ]);
+    return digest({
+      activeRules: activeRules ? {
+        id: activeRules.id,
+        version: activeRules.version,
+        imminentWithinMinutes: activeRules.rules.imminentWithinMinutes,
+      } : null,
+      commitments: commitments
+        .map(({ id, version, status, dueAt }) => ({ id, version, status, dueAt: dueAt ?? null }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
+      attentionDueDates: [...attentionDueDates].sort(),
+    });
   }
 
   async listFeedIds(): Promise<string[]> {
@@ -332,12 +438,18 @@ export class AttentionStore {
   async listWorkspaceCommitments(): Promise<WorkspaceCommitment[]> { return this.workspaceCommitments.list(); }
   async readWorkspaceCommitment(id: string): Promise<WorkspaceCommitment> { return this.workspaceCommitments.get(id); }
   async findWorkspaceCommitmentByKey(key: string): Promise<WorkspaceCommitment | null> { return this.workspaceCommitments.findByDeduplicationKey(key); }
-  async writeWorkspaceCommitment(commitment: WorkspaceCommitment, expectedVersion?: number): Promise<void> { await this.workspaceCommitments.write(commitment, expectedVersion); }
+  async writeWorkspaceCommitment(commitment: WorkspaceCommitment, expectedVersion?: number): Promise<void> {
+    await this.workspaceCommitments.write(commitment, expectedVersion);
+    this.markPriorityScheduleChanged?.();
+  }
   async listCommitmentEvents(commitmentId?: string): Promise<CommitmentEvent[]> { return this.commitmentEvents.list(commitmentId); }
   async appendCommitmentEvent(event: CommitmentEvent): Promise<void> { await this.commitmentEvents.append(event); }
   async listPriorityRuleSets(): Promise<PriorityRuleSet[]> { return this.priorityRules.listRuleSets(); }
   async readActivePriorityRuleSet(): Promise<PriorityRuleSet | null> { return this.priorityRules.active(); }
-  async writePriorityRuleSet(ruleSet: PriorityRuleSet): Promise<void> { await this.priorityRules.writeRuleSet(ruleSet); }
+  async writePriorityRuleSet(ruleSet: PriorityRuleSet): Promise<void> {
+    await this.priorityRules.writeRuleSet(ruleSet);
+    this.markPriorityScheduleChanged?.();
+  }
   async listPriorityRuleProposals(): Promise<PriorityRuleProposal[]> { return this.priorityRules.listProposals(); }
   async readPriorityRuleProposal(id: string): Promise<PriorityRuleProposal> { return this.priorityRules.getProposal(id); }
   async writePriorityRuleProposal(proposal: PriorityRuleProposal): Promise<void> { await this.priorityRules.writeProposal(proposal); }
@@ -646,10 +758,12 @@ export class AttentionStore {
   async writeCard(card: Card): Promise<void> {
     card.updatedAt = isoNow();
     await this.cards.write(card);
+    this.markPriorityScheduleChanged?.();
   }
 
   async removeCard(feedId: string, cardId: string): Promise<void> {
     await this.cards.remove(feedId, cardId);
+    this.markPriorityScheduleChanged?.();
   }
 
   async readRoutineActionGroup(feedId: string, groupId: string): Promise<RoutineActionGroup> {
@@ -699,6 +813,11 @@ export class AttentionStore {
 
   async readEvents(feedId: string): Promise<FeedEvent[]> {
     return this.events.list(feedId);
+  }
+
+  async readEventCursor(feedId: string): Promise<string> {
+    if (this.events.cursor) return this.events.cursor(feedId);
+    return feedEventCursor(await this.events.list(feedId));
   }
 
   async writePolicy(feedId: string, next: string, reason: string, source: PolicyRevision["source"]): Promise<PolicyRevision> {

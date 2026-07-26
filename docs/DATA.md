@@ -49,9 +49,19 @@ ATTENTION_HOME=/path/to/attention tend start
 SQLite is the authority for source profiles and attempts, source runs, commitment candidates,
 canonical commitments and events, priority rules and ledger records, and the materialized Now
 projection. Their file mirrors are readable derived artifacts: they are published only after the
-database transaction commits and are not re-imported on restart. This deliberately prevents a
-failed or rolled-back mirror write from resurrecting state. Use `tend backup export` and import the
-database snapshot for recovery; do not treat an individual mirror file as an authoritative restore.
+database transaction commits and are not re-imported over a valid database on restart. A failed
+post-commit publication marks the database as requiring mirror repair; the next bootstrap rewrites
+derived mirrors from SQLite and removes mutable records that exist only in the mirror. If the
+database is genuinely missing, bootstrap can still rehydrate it from legacy file mirrors. This
+deliberately prevents a stale mirror from resurrecting state while preserving filesystem-only
+migration. Use `tend backup export` and import the database snapshot for recovery; do not treat an
+individual mirror file as an authoritative restore.
+
+The database also stores a runtime readiness generation. Ordinary CLI commands require a compatible
+ready generation and open SQLite without migrations, metadata churn, mirror reconciliation, or a
+WAL checkpoint. Service startup and explicit maintenance own those operations. If readiness is
+absent or incompatible, start Tend (or run the documented maintenance flow) rather than copying or
+editing readiness metadata.
 
 ## Connector Credentials
 

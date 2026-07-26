@@ -9,6 +9,12 @@ export interface FeedEventRepository {
   init(feedIds: string[]): Promise<void>;
   append(event: FeedEvent): Promise<void>;
   list(feedId: string): Promise<FeedEvent[]>;
+  cursor?(feedId: string): Promise<string>;
+}
+
+export function feedEventCursor(events: FeedEvent[]): string {
+  const last = events.at(-1);
+  return `${events.length}:${last?.at ?? ""}:${last?.id ?? ""}`;
 }
 
 export class FileFeedEventRepository implements FeedEventRepository {
@@ -26,6 +32,10 @@ export class FileFeedEventRepository implements FeedEventRepository {
     return (await readFile(file, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as FeedEvent);
   }
 
+  async cursor(feedId: string): Promise<string> {
+    return feedEventCursor(await this.list(feedId));
+  }
+
   private feedPath(feedId: string): string {
     return path.join(this.dataDir, "feeds", feedId);
   }
@@ -40,6 +50,7 @@ export class MirroredFeedEventRepository implements FeedEventRepository {
     private readonly primary: FeedEventRepository,
     private readonly mirror: FeedEventRepository,
     private readonly mirrorWrites?: MirrorWriteCoordinator,
+    private readonly primaryAuthoritative = false,
   ) {}
 
   async init(feedIds: string[]): Promise<void> {
@@ -58,13 +69,20 @@ export class MirroredFeedEventRepository implements FeedEventRepository {
     return this.primary.list(feedId);
   }
 
+  async cursor(feedId: string): Promise<string> {
+    if (this.primary.cursor) return this.primary.cursor(feedId);
+    return feedEventCursor(await this.primary.list(feedId));
+  }
+
   private async syncFeed(feedId: string): Promise<void> {
     const primary = await this.primary.list(feedId);
     const mirror = await this.mirror.list(feedId);
     const primaryIds = new Set(primary.map((event) => event.id));
     const mirrorIds = new Set(mirror.map((event) => event.id));
-    for (const event of mirror.filter((item) => !primaryIds.has(item.id))) {
-      await this.primary.append(event);
+    if (!this.primaryAuthoritative) {
+      for (const event of mirror.filter((item) => !primaryIds.has(item.id))) {
+        await this.primary.append(event);
+      }
     }
     for (const event of primary.filter((item) => !mirrorIds.has(item.id))) {
       await this.mirror.append(event);

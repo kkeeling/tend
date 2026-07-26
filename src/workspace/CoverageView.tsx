@@ -10,9 +10,9 @@ function identity(value: SourceCoverage["expectedIdentity"]): string {
   return Object.entries(value).map(([key, part]) => `${key}: ${part}`).join(" · ");
 }
 
-export function CoverageView({ coverage }: { coverage: WorkspaceCoverage }) {
+export function CoverageView({ coverage, busy = false }: { coverage: WorkspaceCoverage; busy?: boolean }) {
   return (
-    <main className="control-page" aria-labelledby="coverage-title">
+    <main className="control-page" aria-labelledby="coverage-title" aria-busy={busy}>
       <header className="control-hero">
         <div><span className="panel-kicker">Visibility contract</span><h1 id="coverage-title">Coverage</h1><p>{coverage.caveat}</p></div>
         <div className={`coverage-total ${coverage.allClear ? "is-fresh" : "is-degraded"}`}>

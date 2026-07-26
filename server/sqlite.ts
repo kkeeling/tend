@@ -26,17 +26,28 @@ import type { WorkspaceNowProjectionRepository } from "./repositories/workspaceN
 import { configurePrivateProcessPermissions, ensurePrivateFile, PRIVATE_DIRECTORY_MODE } from "./util";
 
 export const SQLITE_SCHEMA_VERSION = 17;
+export const RUNTIME_BOOTSTRAP_GENERATION = "2";
+
+export class RuntimeBootstrapRequiredError extends Error {
+  constructor(readonly repairMirrors = false) {
+    super("This Tend runtime has not completed bootstrap. Start Tend or run an explicit setup/repair command first.");
+    this.name = "RuntimeBootstrapRequiredError";
+  }
+}
 
 export type LocalRuntimeStatus = {
   dbPath: string;
   schemaVersion: number;
   createdAt: string | null;
   updatedAt: string | null;
+  ready: boolean;
+  mirrorRepairRequired: boolean;
 };
 
 export class LocalSqliteStore {
   readonly dbPath: string;
   private db: Database | null = null;
+  private allowCreate = true;
 
   constructor(dbPath = attentionDbPath()) {
     this.dbPath = dbPath;
@@ -51,6 +62,7 @@ export class LocalSqliteStore {
     if (existingSchema > SQLITE_SCHEMA_VERSION) {
       throw new Error(`Runtime schema ${existingSchema} is newer than this Tend build supports (${SQLITE_SCHEMA_VERSION}).`);
     }
+    this.setMeta("runtime_state", "incomplete");
     db.exec(`
       PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS meta (
@@ -280,10 +292,51 @@ export class LocalSqliteStore {
     this.migrateFeedScopedPrimaryKeys();
     this.migrateFeedEventOrdering();
     this.migrateSourceProfiles();
+    this.createGenerationTriggers();
     const now = new Date().toISOString();
     this.setMeta("schema_version", String(SQLITE_SCHEMA_VERSION));
     if (!this.getMeta("created_at")) this.setMeta("created_at", now);
     this.setMeta("updated_at", now);
+  }
+
+  async openReady(): Promise<void> {
+    configurePrivateProcessPermissions();
+    this.allowCreate = false;
+    let schemaVersion = 0;
+    let repairMirrors = false;
+    try {
+      schemaVersion = Number(this.getMeta("schema_version") ?? "0");
+      repairMirrors = this.getMeta("mirror_repair_required") === "1";
+    } catch {
+      throw new RuntimeBootstrapRequiredError();
+    }
+    if (schemaVersion > SQLITE_SCHEMA_VERSION) {
+      throw new Error(`Runtime schema ${schemaVersion} is newer than this Tend build supports (${SQLITE_SCHEMA_VERSION}).`);
+    }
+    if (
+      schemaVersion !== SQLITE_SCHEMA_VERSION
+      || this.getMeta("runtime_state") !== "ready"
+      || this.getMeta("bootstrap_generation") !== RUNTIME_BOOTSTRAP_GENERATION
+    ) {
+      throw new RuntimeBootstrapRequiredError(repairMirrors);
+    }
+  }
+
+  markReady(): void {
+    this.setMeta("bootstrap_generation", RUNTIME_BOOTSTRAP_GENERATION);
+    this.setMeta("runtime_state", "ready");
+  }
+
+  markMirrorRepairRequired(): void {
+    this.setMeta("mirror_repair_required", "1");
+  }
+
+  clearMirrorRepairRequired(): void {
+    this.setMeta("mirror_repair_required", "0");
+  }
+
+  readPriorityScheduleGeneration(): string {
+    return this.getMeta("priority_schedule_generation") ?? "0";
   }
 
   status(): LocalRuntimeStatus {
@@ -294,11 +347,14 @@ export class LocalSqliteStore {
       schemaVersion,
       createdAt: this.getMeta("created_at"),
       updatedAt: this.getMeta("updated_at"),
+      ready: this.getMeta("runtime_state") === "ready"
+        && this.getMeta("bootstrap_generation") === RUNTIME_BOOTSTRAP_GENERATION,
+      mirrorRepairRequired: this.getMeta("mirror_repair_required") === "1",
     };
   }
 
-  close(): void {
-    this.db?.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+  close(options: { checkpoint?: boolean } = {}): void {
+    if (options.checkpoint !== false) this.db?.exec("PRAGMA wal_checkpoint(TRUNCATE);");
     this.db?.close();
     this.db = null;
   }
@@ -397,7 +453,7 @@ export class LocalSqliteStore {
 
   private database(): Database {
     if (!this.db) {
-      this.db = new Database(this.dbPath, { create: true });
+      this.db = new Database(this.dbPath, { create: this.allowCreate, readwrite: true });
       this.db.exec("PRAGMA busy_timeout = 5000;");
     }
     return this.db;
@@ -520,6 +576,96 @@ export class LocalSqliteStore {
     if (!columns.some((column) => column.name === "profile_json")) {
       db.exec("ALTER TABLE source_recipes ADD COLUMN profile_json TEXT;");
     }
+  }
+
+  private createGenerationTriggers(): void {
+    this.database().exec(`
+      DROP TRIGGER IF EXISTS tend_feed_event_generation;
+      DROP TRIGGER IF EXISTS tend_cards_priority_generation_insert;
+      DROP TRIGGER IF EXISTS tend_cards_priority_generation_update;
+      DROP TRIGGER IF EXISTS tend_cards_priority_generation_delete;
+      DROP TRIGGER IF EXISTS tend_commitments_priority_generation_insert;
+      DROP TRIGGER IF EXISTS tend_commitments_priority_generation_update;
+      DROP TRIGGER IF EXISTS tend_commitments_priority_generation_delete;
+      DROP TRIGGER IF EXISTS tend_priority_rules_generation_insert;
+      DROP TRIGGER IF EXISTS tend_priority_rules_generation_update;
+      DROP TRIGGER IF EXISTS tend_priority_rules_generation_delete;
+      CREATE TRIGGER IF NOT EXISTS tend_feed_event_generation
+      AFTER INSERT ON feed_events
+      BEGIN
+        INSERT INTO meta (key, value) VALUES ('feed_event_generation:' || NEW.feed_id, '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+      END;
+      CREATE TRIGGER IF NOT EXISTS tend_cards_priority_generation_insert
+      AFTER INSERT ON cards
+      WHEN NEW.kind = 'attention'
+      BEGIN
+        INSERT INTO meta (key, value) VALUES ('priority_schedule_generation', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+      END;
+      CREATE TRIGGER IF NOT EXISTS tend_cards_priority_generation_update
+      AFTER UPDATE OF kind, status, ready_for_pass, payload_json ON cards
+      WHEN (OLD.kind = 'attention' OR NEW.kind = 'attention')
+        AND (
+          OLD.kind IS NOT NEW.kind
+          OR OLD.status IS NOT NEW.status
+          OR OLD.ready_for_pass IS NOT NEW.ready_for_pass
+          OR json_extract(OLD.payload_json, '$.sweep.hidden') IS NOT json_extract(NEW.payload_json, '$.sweep.hidden')
+          OR json_extract(OLD.payload_json, '$.attentionPriority.dueAt') IS NOT json_extract(NEW.payload_json, '$.attentionPriority.dueAt')
+        )
+      BEGIN
+        INSERT INTO meta (key, value) VALUES ('priority_schedule_generation', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+      END;
+      CREATE TRIGGER IF NOT EXISTS tend_cards_priority_generation_delete
+      AFTER DELETE ON cards
+      WHEN OLD.kind = 'attention'
+      BEGIN
+        INSERT INTO meta (key, value) VALUES ('priority_schedule_generation', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+      END;
+      CREATE TRIGGER IF NOT EXISTS tend_commitments_priority_generation_insert
+      AFTER INSERT ON workspace_commitments
+      BEGIN
+        INSERT INTO meta (key, value) VALUES ('priority_schedule_generation', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+      END;
+      CREATE TRIGGER IF NOT EXISTS tend_commitments_priority_generation_update
+      AFTER UPDATE OF status, payload_json ON workspace_commitments
+      WHEN OLD.status IS NOT NEW.status
+        OR json_extract(OLD.payload_json, '$.dueAt') IS NOT json_extract(NEW.payload_json, '$.dueAt')
+      BEGIN
+        INSERT INTO meta (key, value) VALUES ('priority_schedule_generation', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+      END;
+      CREATE TRIGGER IF NOT EXISTS tend_commitments_priority_generation_delete
+      AFTER DELETE ON workspace_commitments
+      BEGIN
+        INSERT INTO meta (key, value) VALUES ('priority_schedule_generation', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+      END;
+      CREATE TRIGGER IF NOT EXISTS tend_priority_rules_generation_insert
+      AFTER INSERT ON priority_rule_sets
+      BEGIN
+        INSERT INTO meta (key, value) VALUES ('priority_schedule_generation', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+      END;
+      CREATE TRIGGER IF NOT EXISTS tend_priority_rules_generation_update
+      AFTER UPDATE OF version, status, payload_json ON priority_rule_sets
+      WHEN OLD.version IS NOT NEW.version
+        OR OLD.status IS NOT NEW.status
+        OR json_extract(OLD.payload_json, '$.rules.imminentWithinMinutes') IS NOT json_extract(NEW.payload_json, '$.rules.imminentWithinMinutes')
+      BEGIN
+        INSERT INTO meta (key, value) VALUES ('priority_schedule_generation', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+      END;
+      CREATE TRIGGER IF NOT EXISTS tend_priority_rules_generation_delete
+      AFTER DELETE ON priority_rule_sets
+      BEGIN
+        INSERT INTO meta (key, value) VALUES ('priority_schedule_generation', '1')
+        ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+      END;
+    `);
   }
 }
 
@@ -858,6 +1004,69 @@ class SqliteSourceAttemptRepository implements SourceAttemptRepository {
       ? this.database().query("SELECT payload_json FROM source_attempts WHERE feed_id = ? ORDER BY completed_at ASC, id ASC").all(feedId)
       : this.database().query("SELECT payload_json FROM source_attempts WHERE feed_id = ? AND source_id = ? ORDER BY completed_at ASC, id ASC").all(feedId, sourceId);
     return (rows as Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as SourceAttempt);
+  }
+
+  async listForCoverage(
+    feedId: string,
+    sourceIds: string[],
+    qualifies: (attempt: SourceAttempt) => boolean,
+  ): Promise<SourceAttempt[]> {
+    const selected = new Map<string, SourceAttempt>();
+    const uniqueSourceIds = [...new Set(sourceIds)];
+    const sourceChunkSize = 200;
+    const pageSize = 64;
+    for (let chunkStart = 0; chunkStart < uniqueSourceIds.length; chunkStart += sourceChunkSize) {
+      const chunk = uniqueSourceIds.slice(chunkStart, chunkStart + sourceChunkSize);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const latestRows = this.database().query(`
+        WITH ranked AS (
+          SELECT source_id, payload_json,
+            ROW_NUMBER() OVER (PARTITION BY source_id ORDER BY completed_at DESC, id DESC) AS row_number
+          FROM source_attempts
+          WHERE feed_id = ? AND source_id IN (${placeholders})
+        )
+        SELECT source_id, payload_json FROM ranked WHERE row_number = 1
+      `).all(feedId, ...chunk) as Array<{ source_id: string; payload_json: string }>;
+      for (const row of latestRows) {
+        const latest = JSON.parse(row.payload_json) as SourceAttempt;
+        selected.set(latest.id, latest);
+      }
+
+      let unresolved = new Set(chunk);
+      for (let offset = 0; unresolved.size > 0; offset += pageSize) {
+        const unresolvedIds = [...unresolved];
+        const unresolvedPlaceholders = unresolvedIds.map(() => "?").join(", ");
+        const rows = this.database().query(`
+          WITH ranked AS (
+            SELECT source_id, payload_json,
+              ROW_NUMBER() OVER (PARTITION BY source_id ORDER BY completed_at DESC, id DESC) AS row_number
+            FROM source_attempts
+            WHERE feed_id = ? AND source_id IN (${unresolvedPlaceholders})
+              AND outcome IN ('success', 'no_change')
+          )
+          SELECT source_id, payload_json FROM ranked
+          WHERE row_number > ? AND row_number <= ?
+          ORDER BY source_id ASC, row_number ASC
+        `).all(feedId, ...unresolvedIds, offset, offset + pageSize) as Array<{
+          source_id: string;
+          payload_json: string;
+        }>;
+        if (rows.length === 0) break;
+        const sourcesWithRows = new Set<string>();
+        for (const row of rows) {
+          sourcesWithRows.add(row.source_id);
+          if (!unresolved.has(row.source_id)) continue;
+          const attempt = JSON.parse(row.payload_json) as SourceAttempt;
+          if (!qualifies(attempt)) continue;
+          selected.set(attempt.id, attempt);
+          unresolved.delete(row.source_id);
+        }
+        for (const sourceId of unresolvedIds) {
+          if (!sourcesWithRows.has(sourceId)) unresolved.delete(sourceId);
+        }
+      }
+    }
+    return [...selected.values()];
   }
 
   async append(attempt: SourceAttempt): Promise<void> {
@@ -1238,7 +1447,8 @@ class SqliteFeedEventRepository implements FeedEventRepository {
   async init(_feedIds: string[]): Promise<void> {}
 
   async append(event: FeedEvent): Promise<void> {
-    this.database()
+    const database = this.database();
+    const result = database
       .query(`
         INSERT INTO feed_events (event_order, id, feed_id, type, at, card_id, work_id, detail_json)
         VALUES ((SELECT COALESCE(MAX(event_order), 0) + 1 FROM feed_events), ?, ?, ?, ?, ?, ?, ?)
@@ -1253,6 +1463,7 @@ class SqliteFeedEventRepository implements FeedEventRepository {
         event.workId ?? null,
         event.detail === undefined ? null : JSON.stringify(event.detail),
       );
+    void result;
   }
 
   async list(feedId: string): Promise<FeedEvent[]> {
@@ -1268,6 +1479,12 @@ class SqliteFeedEventRepository implements FeedEventRepository {
       ...(row.work_id ? { workId: row.work_id } : {}),
       ...(row.detail_json ? { detail: JSON.parse(row.detail_json) as unknown } : {}),
     }));
+  }
+
+  async cursor(feedId: string): Promise<string> {
+    const row = this.database().query("SELECT value FROM meta WHERE key = ?")
+      .get(feedEventGenerationKey(feedId)) as { value: string } | undefined;
+    return row?.value ?? "0";
   }
 }
 
@@ -1314,4 +1531,8 @@ class SqliteWorkspaceFeedRepository implements WorkspaceFeedRepository {
 
 function unique(values: string[]): string[] {
   return Array.from(new Set(values));
+}
+
+function feedEventGenerationKey(feedId: string): string {
+  return `feed_event_generation:${feedId}`;
 }

@@ -18,7 +18,7 @@ export async function startBackgroundCommand(): Promise<void> {
       }
     }
     await rm(pidFile(), { force: true });
-    await launchDetached();
+    const launched = await launchDetached();
     for (let index = 0; index < 60; index += 1) {
       if (await serviceHealthy()) {
         print(`Tend is healthy (pid ${(await readPidRecord())?.pid ?? "unknown"}, url ${apiUrl()}, home ${attentionHome()}).`);
@@ -26,6 +26,10 @@ export async function startBackgroundCommand(): Promise<void> {
       }
       await Bun.sleep(250);
     }
+    if (processAlive(launched.pid) && await ownsTendProcess(launched)) {
+      await terminate(launched.pid);
+    }
+    await rm(pidFile(), { force: true });
     throw new Error(`Tend failed to become healthy. Recent log output:\n${await recentLogs()}`);
   });
 }
@@ -73,7 +77,7 @@ export async function logsCommand(): Promise<void> {
   print(await recentLogs());
 }
 
-async function launchDetached(): Promise<void> {
+async function launchDetached(): Promise<ServicePidRecord> {
   configurePrivateProcessPermissions();
   await ensurePrivateDirectory(attentionHome());
   await ensurePrivateDirectory(attentionLogDir());
@@ -92,13 +96,15 @@ async function launchDetached(): Promise<void> {
     windowsHide: true,
   });
   proc.unref();
-  await writeFile(pidFile(), `${JSON.stringify({
+  const record: ServicePidRecord = {
     pid: proc.pid,
     command: foregroundCommand,
     home: path.resolve(attentionHome()),
     apiPort: apiPort(),
     startedAt: new Date().toISOString(),
-  }, null, 2)}\n`, { mode: PRIVATE_FILE_MODE });
+  };
+  await writeFile(pidFile(), `${JSON.stringify(record, null, 2)}\n`, { mode: PRIVATE_FILE_MODE });
+  return record;
 }
 
 function backgroundCommand(command: string[]): string[] {

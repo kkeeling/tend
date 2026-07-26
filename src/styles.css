@@ -117,6 +117,9 @@ h2 { margin: 0; font: 500 26px/1.12 var(--serif); letter-spacing: -.02em; }
 .checkmark { color: var(--sage); }
 .block-editor textarea { width: 100%; resize: vertical; padding: 13px 14px; border: 1px solid var(--line-2); border-radius: 7px; outline: none; background: #fffffd; line-height: 1.55; }
 .block-editor textarea:focus { border-color: #aab8dc; box-shadow: 0 0 0 3px var(--blue-soft); }
+.edit-conflict { display: grid; gap: 7px; margin-top: 9px; padding: 11px 12px; border: 1px solid #d8c49f; border-radius: 7px; background: #faf4e8; color: var(--ink-2); font-size: 12px; }
+.edit-conflict p, .edit-error { margin: 0; }
+.edit-error { margin-top: 7px; color: #a14238; font-size: 12px; }
 .block-options { display: grid; gap: 7px; }
 .option { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper-warm); }
 .option span { color: var(--ink-3); font-size: 13px; }
@@ -427,6 +430,7 @@ pre { overflow: auto; padding: 12px; background: #f4f2eb; color: var(--ink-2); w
 .ledger-list time, .ledger-list small { color: var(--ink-4); font: 10px/1.4 var(--mono); }
 .ledger-list p { margin: 7px 0; color: var(--ink-2); }
 .workspace-dock .button:disabled { opacity: .45; cursor: default; }
+.dock-recovery { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; padding: 8px 10px; border: 1px solid #d8c49f; border-radius: 7px; background: #faf4e8; color: var(--ink-2); font-size: 12px; }
 
 @media (max-width: 680px) {
   .page { padding: 30px 13px 190px; }

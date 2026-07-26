@@ -79,14 +79,20 @@ export class FileMindContextRepository implements MindContextRepository {
 }
 
 export class MirroredMindContextRepository implements MindContextRepository {
-  constructor(private readonly primary: MindContextRepository, private readonly mirror: MindContextRepository) {}
+  constructor(
+    private readonly primary: MindContextRepository,
+    private readonly mirror: MindContextRepository,
+    private readonly primaryAuthoritative = false,
+  ) {}
 
   async init(): Promise<void> {
     await this.mirror.init();
     await this.primary.init();
     const [primaryBinding, mirrorBinding] = await Promise.all([this.primary.readBinding(), this.mirror.readBinding()]);
-    if (!primaryBinding.publisherThreadId && mirrorBinding.publisherThreadId) await this.primary.writeBinding(mirrorBinding);
-    if (primaryBinding.publisherThreadId && (
+    if (!primaryBinding.publisherThreadId && mirrorBinding.publisherThreadId && !this.primaryAuthoritative) {
+      await this.primary.writeBinding(mirrorBinding);
+    }
+    if ((this.primaryAuthoritative || primaryBinding.publisherThreadId) && (
       primaryBinding.publisherThreadId !== mirrorBinding.publisherThreadId ||
       primaryBinding.boundAt !== mirrorBinding.boundAt
     )) {
@@ -131,7 +137,10 @@ export class MirroredMindContextRepository implements MindContextRepository {
     const mirror = await this.mirror.listUpdates();
     const primaryIds = new Set(primary.map((update) => update.id));
     const mirrorIds = new Set(mirror.map((update) => update.id));
-    for (const update of mirror.filter((item) => !primaryIds.has(item.id))) await this.primary.writeUpdate(update);
+    for (const update of mirror.filter((item) => !primaryIds.has(item.id))) {
+      if (this.primaryAuthoritative) await this.mirror.removeUpdate(update.id);
+      else await this.primary.writeUpdate(update);
+    }
     const mirrorById = new Map(mirror.map((update) => [update.id, update]));
     for (const update of primary.filter((item) =>
       !mirrorIds.has(item.id) || mirrorById.get(item.id)?.contentDigest !== item.contentDigest)) {

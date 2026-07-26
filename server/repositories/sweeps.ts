@@ -110,6 +110,7 @@ export class MirroredSweepRepository implements SweepRepository {
     private readonly primary: SweepRepository,
     private readonly mirror: SweepRepository,
     private readonly mirrorWrites?: MirrorWriteCoordinator,
+    private readonly primaryAuthoritative = false,
   ) {}
 
   async init(feedIds: string[]): Promise<void> {
@@ -159,7 +160,12 @@ export class MirroredSweepRepository implements SweepRepository {
 
   private async syncFeed(feedId: string): Promise<void> {
     const [primaryHasState, mirrorHasState] = await Promise.all([this.primary.hasState(feedId), this.mirror.hasState(feedId)]);
-    if (!primaryHasState && mirrorHasState) await this.primary.writeState(feedId, await this.mirror.readState(feedId));
+    if (!primaryHasState && mirrorHasState && !this.primaryAuthoritative) {
+      await this.primary.writeState(feedId, await this.mirror.readState(feedId));
+    }
+    if (!primaryHasState && mirrorHasState && this.primaryAuthoritative) {
+      await this.mirror.writeState(feedId, await this.primary.readState(feedId));
+    }
     if (primaryHasState) await this.mirror.writeState(feedId, await this.primary.readState(feedId));
 
     await this.syncBatches(feedId);
@@ -170,7 +176,9 @@ export class MirroredSweepRepository implements SweepRepository {
     const primary = await this.primary.listBatches(feedId);
     const mirror = await this.mirror.listBatches(feedId);
     const primaryIds = new Set(primary.map((batch) => batch.id));
-    for (const batch of mirror.filter((item) => !primaryIds.has(item.id))) await this.primary.writeBatch(batch);
+    if (!this.primaryAuthoritative) {
+      for (const batch of mirror.filter((item) => !primaryIds.has(item.id))) await this.primary.writeBatch(batch);
+    }
     for (const batch of primary) await this.mirror.writeBatch(batch);
   }
 
@@ -178,7 +186,9 @@ export class MirroredSweepRepository implements SweepRepository {
     const primary = await this.primary.listFeedback(feedId);
     const mirror = await this.mirror.listFeedback(feedId);
     const primaryIds = new Set(primary.map((trace) => trace.id));
-    for (const trace of mirror.filter((item) => !primaryIds.has(item.id))) await this.primary.writeFeedback(trace);
+    if (!this.primaryAuthoritative) {
+      for (const trace of mirror.filter((item) => !primaryIds.has(item.id))) await this.primary.writeFeedback(trace);
+    }
     for (const trace of primary) await this.mirror.writeFeedback(trace);
   }
 

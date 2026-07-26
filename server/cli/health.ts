@@ -8,7 +8,7 @@ type DoctorCheck = { name: string; ok: boolean; detail: string };
 export async function statusCommand(): Promise<void> {
   const sqlite = await initRuntime();
   print({ version: versionInfo(), ...localPaths(), sqlite: sqlite.status() });
-  sqlite.close();
+  sqlite.close({ checkpoint: false });
 }
 
 export async function doctorCommand(): Promise<void> {
@@ -22,7 +22,7 @@ export async function doctorCommand(): Promise<void> {
     await checkApiStatus(),
   ];
   print({ ok: checks.every((check) => check.ok), checks });
-  sqlite.close();
+  sqlite.close({ checkpoint: false });
 }
 
 async function checkApiStatus(): Promise<DoctorCheck> {

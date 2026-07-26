@@ -23,6 +23,16 @@ function isComplete(value: SourceAttemptCompleteness | undefined): boolean {
   );
 }
 
+export function isCoverageQualifyingAttempt(recipe: SourceRecipe, attempt: SourceAttempt): boolean {
+  return (
+    (attempt.outcome === "success" || attempt.outcome === "no_change")
+    && (attempt.outcome === "no_change" ? !attempt.checkpointAdvanced : attempt.checkpointAdvanced)
+    && Boolean(attempt.observedIdentity)
+    && sourceIdentityMatches(recipe.profile?.expectedIdentity ?? {}, attempt.observedIdentity!)
+    && isComplete(attempt.completeness)
+  );
+}
+
 function completedAtSort(left: SourceAttempt, right: SourceAttempt): number {
   return left.completedAt.localeCompare(right.completedAt) || left.id.localeCompare(right.id);
 }
@@ -95,13 +105,7 @@ export function projectCoverage(
     const profile = recipe.profile;
     const sourceAttempts = attemptsBySource.get(`${feedId}\u0000${recipe.id}`) ?? [];
     const last = sourceAttempts.at(-1);
-    const lastGood = sourceAttempts.filter((attempt) =>
-      (attempt.outcome === "success" || attempt.outcome === "no_change")
-      && (attempt.outcome === "no_change" ? !attempt.checkpointAdvanced : attempt.checkpointAdvanced)
-      && Boolean(attempt.observedIdentity)
-      && sourceIdentityMatches(profile?.expectedIdentity ?? {}, attempt.observedIdentity!)
-      && isComplete(attempt.completeness),
-    ).at(-1);
+    const lastGood = sourceAttempts.filter((attempt) => isCoverageQualifyingAttempt(recipe, attempt)).at(-1);
 
     let state: SourceCoverageState;
     if (!profile) state = "not_configured";

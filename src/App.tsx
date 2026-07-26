@@ -13,7 +13,7 @@ import { InspectorPanel } from "./shell/InspectorPanel";
 import { TopBar } from "./shell/TopBar";
 import { useActiveCard } from "./state/activeCard";
 import { cardDispositionUndoPath, sameUndoRegistration, type CardDispositionUndo } from "./state/cardDispositionUndo";
-import { RealtimeProvider } from "./state/realtime";
+import { RealtimeProvider, useRefreshCoalescer } from "./state/realtime";
 import { preferredTarget, sameTarget } from "./state/voiceTarget";
 import type { Card, CardAction, FeedView, RevisionProposal, RoutineActionGroup, VoiceTarget, WorkItemView, WorkspaceRevision, WorkspaceView } from "./types";
 import { FormattedText } from "./ui/FormattedText";
@@ -91,14 +91,21 @@ export default function App({ feedId, screen, workspaceTab }: { feedId: string; 
 
   const workspaceQuery = useQuery({
     queryKey: ["workspace", feedId],
-    queryFn: () => api<WorkspaceView>(`/api/state?feed=${encodeURIComponent(feedId)}`),
+    queryFn: ({ signal }) => api<WorkspaceView>(`/api/state?feed=${encodeURIComponent(feedId)}`, { signal }),
   });
   const state = workspaceQuery.data ?? null;
-  const refresh = useCallback(async (nextFeed = feedId) => {
+  const refreshQuery = useCallback(async (nextFeed = feedId) => {
     await queryClient.invalidateQueries({ queryKey: ["workspace", nextFeed] });
   }, [feedId, queryClient]);
+  const refreshCurrentFeed = useRefreshCoalescer(
+    () => refreshQuery(),
+    () => queryClient.cancelQueries({ queryKey: ["workspace", feedId] }),
+  );
+  const refresh = useCallback((nextFeed = feedId) => (
+    nextFeed === feedId ? refreshCurrentFeed() : refreshQuery(nextFeed)
+  ), [feedId, refreshCurrentFeed, refreshQuery]);
   const withRealtime = (children: ReactNode) => (
-    <RealtimeProvider enabled onChange={() => void refresh()}>
+    <RealtimeProvider enabled onChange={refresh}>
       {children}
     </RealtimeProvider>
   );

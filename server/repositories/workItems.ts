@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import type { WorkItem } from "../../shared/types";
 import { readJson, writeJson } from "../util";
@@ -10,6 +10,7 @@ export interface WorkItemRepository {
   list(feedId: string): Promise<WorkItem[]>;
   get(feedId: string, workId: string): Promise<WorkItem>;
   write(work: WorkItem): Promise<void>;
+  remove?(feedId: string, workId: string): Promise<void>;
 }
 
 export class FileWorkItemRepository implements WorkItemRepository {
@@ -32,6 +33,10 @@ export class FileWorkItemRepository implements WorkItemRepository {
     await writeJson(this.workFile(work.feedId, work.id), work);
   }
 
+  async remove(feedId: string, workId: string): Promise<void> {
+    await rm(this.workFile(feedId, workId), { force: true });
+  }
+
   private workPath(feedId: string): string {
     return path.join(this.dataDir, "feeds", feedId, "work");
   }
@@ -46,6 +51,7 @@ export class MirroredWorkItemRepository implements WorkItemRepository {
     private readonly primary: WorkItemRepository,
     private readonly mirror: WorkItemRepository,
     private readonly mirrorWrites?: MirrorWriteCoordinator,
+    private readonly primaryAuthoritative = false,
   ) {}
 
   async init(feedIds: string[]): Promise<void> {
@@ -72,8 +78,14 @@ export class MirroredWorkItemRepository implements WorkItemRepository {
     const primary = await this.primary.list(feedId);
     const mirror = await this.mirror.list(feedId);
     const primaryIds = new Set(primary.map((work) => work.id));
-    for (const work of mirror.filter((item) => !primaryIds.has(item.id))) {
-      await this.primary.write(work);
+    if (!this.primaryAuthoritative) {
+      for (const work of mirror.filter((item) => !primaryIds.has(item.id))) {
+        await this.primary.write(work);
+      }
+    } else if (this.mirror.remove) {
+      for (const work of mirror.filter((item) => !primaryIds.has(item.id))) {
+        await this.mirror.remove(feedId, work.id);
+      }
     }
     for (const work of primary) {
       await this.mirror.write(work);

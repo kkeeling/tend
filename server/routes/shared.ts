@@ -4,7 +4,7 @@ import type { LocalSqliteStore } from "../sqlite";
 import type { AttentionStore } from "../store";
 import type { MobileSyncStatus } from "../../shared/mobile";
 
-export type Notify = (data: unknown) => void;
+export type Notify = (data: unknown) => void | Promise<void>;
 
 export type LocalRouteContext = {
   artifactsDir: string;
@@ -42,13 +42,23 @@ export async function mutation(c: any, notify: Notify, callback: () => Promise<u
   if (origin && !isAllowedLocalOrigin(origin)) {
     return c.json({ error: "Mutating requests are only accepted from localhost origins." }, 403);
   }
+  let result: unknown;
   try {
-    const result = await callback();
-    if (shouldNotify(result)) notify({ changedAt: new Date().toISOString() });
-    return c.json(redactBrowserMutationResult(result));
+    result = await callback();
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
   }
+  if (shouldNotify(result)) {
+    try {
+      await notify({ changedAt: new Date().toISOString() });
+    } catch (error) {
+      // The callback has already committed. Returning a mutation failure here would
+      // invite a duplicate retry, so preserve the authoritative result and let the
+      // client's canonical inspection plus the durable cursor bridge reconcile.
+      console.error("[realtime] post-commit notification failed:", error);
+    }
+  }
+  return c.json(redactBrowserMutationResult(result));
 }
 
 function redactBrowserMutationResult(value: unknown): unknown {
@@ -83,6 +93,10 @@ export function mutationAccessError(c: any, expectedToken: string): Response | n
 
 export function aggregatedReadAccessError(c: any, expectedToken: string): Response | null {
   if (c.req.method !== "GET" || !String(c.req.path ?? "").startsWith("/api/workspace")) return null;
+  const origin = c.req.header("origin");
+  if (origin && !isLoopbackOrigin(origin)) {
+    return c.json({ error: "Cross-origin API requests are not allowed." }, 403);
+  }
   const suppliedToken = c.req.header("x-attention-read-token") ?? "";
   if (!tokensMatch(suppliedToken, expectedToken)) {
     return c.json({ error: "A current local read token is required for aggregated workspace data." }, 403);

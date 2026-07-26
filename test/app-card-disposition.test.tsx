@@ -1,12 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import App from "../src/App";
 import type { Card, FeedView, WorkspaceView } from "../shared/types";
+import { registerHappyDom } from "./happy-dom";
 
-GlobalRegistrator.register();
+const originalFetch = globalThis.fetch;
+const originalEventSource = globalThis.EventSource;
+registerHappyDom();
 
 class StubEventSource {
   onerror: ((event: Event) => void) | null = null;
@@ -15,8 +17,11 @@ class StubEventSource {
 }
 
 Object.assign(globalThis, { EventSource: StubEventSource });
-
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  globalThis.fetch = originalFetch;
+  globalThis.EventSource = originalEventSource;
+});
 
 function workspace(): WorkspaceView {
   const card: Card = {

@@ -46,6 +46,7 @@ export class MirroredSourceRunRepository implements SourceRunRepository {
     private readonly primary: SourceRunRepository,
     private readonly mirror: SourceRunRepository,
     private readonly mirrorWrites?: MirrorWriteCoordinator,
+    private readonly primaryAuthoritative = false,
   ) {}
 
   async init(feedIds: string[]): Promise<void> {
@@ -73,8 +74,10 @@ export class MirroredSourceRunRepository implements SourceRunRepository {
     const mirror = await this.mirror.list(feedId);
     const primaryIds = new Set(primary.map((run) => run.id));
     const mirrorIds = new Set(mirror.map((run) => run.id));
-    for (const run of mirror.filter((item) => !primaryIds.has(item.id))) {
-      await this.primary.write(run);
+    if (!this.primaryAuthoritative) {
+      for (const run of mirror.filter((item) => !primaryIds.has(item.id))) {
+        await this.primary.write(run);
+      }
     }
     for (const run of primary.filter((item) => !mirrorIds.has(item.id))) {
       await this.mirror.write(run);

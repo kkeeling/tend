@@ -1,11 +1,12 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { cp, mkdir, mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
+import { request } from "node:http";
+import { cp, lstat, mkdir, mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { attentionDataDir, attentionDbPath, attentionHome } from "../paths";
 import { SQLITE_SCHEMA_VERSION } from "../sqlite";
-import { configurePrivateProcessPermissions, ensurePrivateDirectory, hardenPrivateTree, PRIVATE_FILE_MODE, withMutationLock } from "../util";
+import { configurePrivateProcessPermissions, ensurePrivateDirectory, hardenPrivateTree, PRIVATE_FILE_MODE, withMutationLock, withRuntimeReplacementLock } from "../util";
 import { apiUrl, initRuntime, print } from "./shared";
 
 export async function backupExportCommand(targetPath: string): Promise<void> {
@@ -51,6 +52,10 @@ export async function backupImportCommand(sourcePath: string): Promise<void> {
   configurePrivateProcessPermissions();
   const source = path.resolve(sourcePath);
   if (!existsSync(source)) throw new Error(`Backup path does not exist: ${source}`);
+  await withRuntimeReplacementLock(attentionHome(), () => importStoppedRuntime(source));
+}
+
+async function importStoppedRuntime(source: string): Promise<void> {
   await assertRuntimeStopped();
 
   const bundledData = path.join(source, "data");
@@ -69,7 +74,9 @@ export async function backupImportCommand(sourcePath: string): Promise<void> {
     await rm(path.join(stagedData, ".mutation-lock"), { recursive: true, force: true });
     if (existsSync(bundledDb)) {
       await cp(bundledDb, stagedDb);
+      await assertRegularBackupFile(stagedDb);
       validateSqliteBackup(stagedDb);
+      invalidateRuntimeReadiness(stagedDb);
     }
     await hardenPrivateTree(stagedData);
     if (existsSync(stagedDb)) await hardenPrivateTree(stagedDb);
@@ -116,6 +123,22 @@ export async function backupImportCommand(sourcePath: string): Promise<void> {
   });
 }
 
+export async function assertRegularBackupFile(dbPath: string): Promise<void> {
+  const metadata = await lstat(dbPath);
+  if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    throw new Error("Backup attention.db must be a regular file, not a symbolic link or special file.");
+  }
+}
+
+function invalidateRuntimeReadiness(dbPath: string): void {
+  const db = new Database(dbPath);
+  try {
+    db.query("INSERT INTO meta (key, value) VALUES ('runtime_state', 'incomplete') ON CONFLICT(key) DO UPDATE SET value = excluded.value").run();
+  } finally {
+    db.close();
+  }
+}
+
 function validateSqliteBackup(dbPath: string): void {
   const db = new Database(dbPath, { readonly: true });
   try {
@@ -141,17 +164,49 @@ function validateSqliteBackup(dbPath: string): void {
   }
 }
 
-async function assertRuntimeStopped(): Promise<void> {
+export async function assertRuntimeStopped(url = `${apiUrl()}/api/status`): Promise<void> {
   try {
-    const response = await fetch(`${apiUrl()}/api/status`, { signal: AbortSignal.timeout(750) });
-    if (!response.ok) return;
-    const status = await response.json() as { dataDir?: string };
-    if (status.dataDir && path.resolve(status.dataDir, "..") === path.resolve(attentionHome())) {
-      throw new Error("Stop Tend before importing a backup into its active runtime.");
-    }
+    await probeLocalListener(url, 750);
+    throw new Error("Stop Tend before importing a backup. A local service listener is still active.");
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Stop Tend")) throw error;
+    if (isConnectionRefused(error)) return;
+    throw new Error(
+      `Cannot verify that Tend is stopped; refusing backup import: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
+}
+
+function probeLocalListener(url: string, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const probe = request(url, { method: "GET", agent: false }, (response) => {
+      response.destroy();
+      finish(resolve);
+    });
+    const timer = setTimeout(() => {
+      const error = Object.assign(new Error(`Local Tend status probe timed out after ${timeoutMs}ms.`), { code: "ETIMEDOUT" });
+      probe.destroy(error);
+      finish(() => reject(error));
+    }, timeoutMs);
+    probe.on("error", (error) => finish(() => reject(error)));
+    probe.end();
+  });
+}
+
+function isConnectionRefused(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  if ("code" in error && (error as { code?: unknown }).code === "ECONNREFUSED") return true;
+  if ("cause" in error && isConnectionRefused((error as { cause?: unknown }).cause)) return true;
+  if (error instanceof AggregateError) return error.errors.some(isConnectionRefused);
+  return false;
 }
 
 async function removeSqliteFiles(): Promise<void> {

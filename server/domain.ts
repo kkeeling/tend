@@ -61,13 +61,13 @@ import { agentLabel, effectiveWorkLane } from "../shared/lanes";
 import { agentPresenceLiveness, AttentionStore, FEED_PROMPT_NAMES, workItemView } from "./store";
 import { demoCards, feedConfig, providerSourceRecipe } from "./templates";
 import { detectMonologue } from "./monologue";
-import { digest, isoNow, makeId, makeToken, safeIdentifier, slugify } from "./util";
+import { digest, isRecord, isoNow, makeId, makeToken, safeIdentifier, slugify } from "./util";
 import { actionDigest, cleanupDigest, configuredApprovalAction, requiredSourceMailbox, routineActionDigest, verifySourceMailbox } from "./workflow/approvals";
 import { queuedWork } from "./workflow/workItems";
 import { mobileActionConfirmation, projectMobileCard, projectMobileRoutineAction } from "./mobile/projection";
 import { assertCommitmentTransition } from "./workflow/commitments";
 import { commitmentQualityGate, validatedCommitmentSourceClass } from "./workflow/commitmentQuality";
-import { DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION, PRIORITY_RECIPE_DIGEST, evaluatePriorityRows } from "./workflow/priority";
+import { DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION, PRIORITY_RECIPE_DIGEST, evaluatePriorityRows, nextPriorityBoundaryAt } from "./workflow/priority";
 import {
   assertConnectorVerificationFresh,
   executionRequirementDigest,
@@ -217,10 +217,6 @@ const CARD_BLOCK_TYPES = new Set<CardBlock["type"]>([
   "chart",
   "receipt",
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function hasText(value: unknown): value is string {
   return typeof value === "string" && Boolean(value.trim());
@@ -3868,24 +3864,68 @@ export class AttentionDomain {
     judgmentPolicyVersion = DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION,
     now = new Date(),
   ): Promise<WorkspaceNowRow[]> {
-    return this.store.serializeAtomic(() => this.refreshWorkspacePrioritiesLocked(judgmentPolicyVersion, now));
+    return (await this.refreshWorkspacePrioritiesWithResult(judgmentPolicyVersion, now)).rows;
+  }
+
+  async refreshWorkspacePrioritiesWithResult(
+    judgmentPolicyVersion = DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION,
+    now = new Date(),
+  ): Promise<{ rows: WorkspaceNowRow[]; changed: boolean }> {
+    return this.store.serializeAtomic(() => this.refreshWorkspacePrioritiesResultLocked(judgmentPolicyVersion, now));
+  }
+
+  async nextWorkspacePriorityBoundary(now = new Date()): Promise<Date | null> {
+    const ruleSet = await this.store.readActivePriorityRuleSet();
+    if (!ruleSet) return null;
+    const [commitments, attentionDueDates] = await Promise.all([
+      this.store.listWorkspaceCommitments(),
+      this.store.listVisibleAttentionPriorityDueDates(),
+    ]);
+    const activeCommitmentDueDates = commitments
+      .filter((item) => !["fulfilled", "withdrawn", "superseded"].includes(item.status))
+      .map((item) => item.dueAt);
+    return nextPriorityBoundaryAt(
+      [...activeCommitmentDueDates, ...attentionDueDates],
+      ruleSet.rules.imminentWithinMinutes,
+      now,
+    );
   }
 
   private async refreshWorkspacePrioritiesLocked(
     judgmentPolicyVersion = DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION,
     now = new Date(),
   ): Promise<WorkspaceNowRow[]> {
-    if (!(await this.store.readActivePriorityRuleSet())) return this.store.readWorkspaceNowProjection();
-    return this.evaluateWorkspacePrioritiesLocked(judgmentPolicyVersion, now);
+    return (await this.refreshWorkspacePrioritiesResultLocked(judgmentPolicyVersion, now)).rows;
+  }
+
+  private async refreshWorkspacePrioritiesResultLocked(
+    judgmentPolicyVersion = DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION,
+    now = new Date(),
+  ): Promise<{ rows: WorkspaceNowRow[]; changed: boolean }> {
+    const ruleSet = await this.store.readActivePriorityRuleSet();
+    if (!ruleSet) {
+      return { rows: await this.store.readWorkspaceNowProjection(), changed: false };
+    }
+    return this.evaluateWorkspacePrioritiesResultLocked(judgmentPolicyVersion, now, ruleSet);
   }
 
   private async evaluateWorkspacePrioritiesLocked(judgmentPolicyVersion: string, now: Date): Promise<WorkspaceNowRow[]> {
+    return (await this.evaluateWorkspacePrioritiesResultLocked(judgmentPolicyVersion, now)).rows;
+  }
+
+  private async evaluateWorkspacePrioritiesResultLocked(
+    judgmentPolicyVersion: string,
+    now: Date,
+    providedRuleSet?: PriorityRuleSet,
+  ): Promise<{ rows: WorkspaceNowRow[]; changed: boolean }> {
     const policyVersion = requiredMindText(judgmentPolicyVersion, "Priority judgment policy version", 80);
-    const ruleSet = await this.store.readActivePriorityRuleSet();
+    const ruleSet = providedRuleSet ?? await this.store.readActivePriorityRuleSet();
     if (!ruleSet) throw new Error("Priority rules are not configured; ordering is unavailable rather than model-guessed.");
     const rows = evaluatePriorityRows(await this.store.listWorkspaceCommitments(), ruleSet, policyVersion, now);
     const previous = await this.store.readWorkspaceNowProjection();
-    if (previous.length === rows.length && previous.every((row, index) => row.id === rows[index]?.id && row.inputDigest === rows[index]?.inputDigest)) return previous;
+    if (previous.length === rows.length && previous.every((row, index) => row.id === rows[index]?.id && row.inputDigest === rows[index]?.inputDigest)) {
+      return { rows: previous, changed: false };
+    }
 
     const previousById = new Map(previous.map((row) => [row.id, row]));
     for (const row of rows) {
@@ -3920,7 +3960,7 @@ export class AttentionDomain {
       }
     }
     await this.store.replaceWorkspaceNowProjection(rows);
-    return rows;
+    return { rows, changed: true };
   }
 
   async recordPriorityCorrection(input: {

@@ -57,11 +57,20 @@ export class FileWorkspaceFeedRepository implements WorkspaceFeedRepository {
 }
 
 export class MirroredWorkspaceFeedRepository implements WorkspaceFeedRepository {
-  constructor(private readonly primary: WorkspaceFeedRepository, private readonly mirror: WorkspaceFeedRepository) {}
+  constructor(
+    private readonly primary: WorkspaceFeedRepository,
+    private readonly mirror: WorkspaceFeedRepository,
+    private readonly primaryAuthoritative = false,
+  ) {}
 
   async init(defaultFeedIds: string[]): Promise<void> {
     await this.mirror.init(defaultFeedIds);
     const mirrorIds = await this.mirror.listFeedIds();
+    if (this.primaryAuthoritative) {
+      await this.primary.init(defaultFeedIds);
+      await this.mirror.setFeedIds(await this.primary.listFeedIds());
+      return;
+    }
     await this.primary.init(mirrorIds.length ? mirrorIds : defaultFeedIds);
     const merged = unique([...(await this.primary.listFeedIds()), ...mirrorIds]);
     await this.primary.setFeedIds(merged);

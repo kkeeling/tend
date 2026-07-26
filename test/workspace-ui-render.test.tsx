@@ -77,6 +77,55 @@ test("Now renders the existing editable card and exact CTA with composite identi
   expect(html).toContain("Due today and high consequence.");
 });
 
+test("Now renders the exact in-flight CTA and semantic busy state until canonical refresh completes", () => {
+  const html = renderToStaticMarkup(
+    <NowView
+      control={control}
+      activeId="mailbox-work-a:reply-card"
+      pendingActionKeys={new Set(["mailbox-work-a\u0000reply-card"])}
+      busy
+      {...handlers}
+    />,
+  );
+  expect(html).toContain('<main class="control-page now-page" aria-labelledby="now-title" aria-busy="true">');
+  expect(html).toContain('aria-busy="true"');
+  expect(html).toContain("disabled");
+  expect(html).toContain("Send reply…");
+});
+
+test("Now pauses editable blocks and return-to-review controls while canonical state is stale", () => {
+  const staleHtml = renderToStaticMarkup(
+    <NowView
+      control={control}
+      activeId="mailbox-work-a:reply-card"
+      mutationsDisabled
+      {...handlers}
+    />,
+  );
+  expect(staleHtml).toContain("readonly");
+  expect(staleHtml).toContain('aria-disabled="true"');
+  expect(staleHtml).toContain('aria-label="Send reply"');
+  expect(staleHtml).toContain("disabled");
+
+  const doneControl = {
+    ...control,
+    now: {
+      ...control.now,
+      items: [{ ...control.now.items[0], card: { ...card, status: "done" as const } }],
+    },
+  };
+  const doneHtml = renderToStaticMarkup(
+    <NowView
+      control={doneControl}
+      activeId="mailbox-work-a:reply-card"
+      mutationsDisabled
+      {...handlers}
+    />,
+  );
+  expect(doneHtml).toContain("Review again");
+  expect(doneHtml).toContain("disabled");
+});
+
 test("Now exposes safe multi-source commitment provenance", () => {
   const commitmentControl: WorkspaceControlPlane = {
     ...control,
