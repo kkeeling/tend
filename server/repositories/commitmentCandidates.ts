@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import type { CommitmentCandidate } from "../../shared/types";
 import type { MirrorWriteCoordinator } from "./mirrorWrites";
@@ -10,6 +10,7 @@ export interface CommitmentCandidateRepository {
   list(): Promise<CommitmentCandidate[]>;
   get(id: string): Promise<CommitmentCandidate>;
   write(candidate: CommitmentCandidate): Promise<void>;
+  remove?(id: string): Promise<void>;
 }
 
 export class FileCommitmentCandidateRepository implements CommitmentCandidateRepository {
@@ -25,6 +26,7 @@ export class FileCommitmentCandidateRepository implements CommitmentCandidateRep
     return readJson<CommitmentCandidate>(this.file(id));
   }
   async write(candidate: CommitmentCandidate): Promise<void> { await writeJson(this.file(candidate.id), candidate); }
+  async remove(id: string): Promise<void> { await rm(this.file(id), { force: true }); }
   private dir(): string { return path.join(this.dataDir, "workspace", "commitment-candidates"); }
   private file(id: string): string { return path.join(this.dir(), `${id}.json`); }
 }
@@ -34,14 +36,24 @@ export class MirroredCommitmentCandidateRepository implements CommitmentCandidat
     private readonly primary: CommitmentCandidateRepository,
     private readonly mirror: CommitmentCandidateRepository,
     private readonly mirrorWrites?: MirrorWriteCoordinator,
+    private readonly primaryAuthoritative = false,
   ) {}
   async init(): Promise<void> {
     await this.primary.init();
     await this.mirror.init();
     const primary = await this.primary.list();
     const mirror = await this.mirror.list();
+    const primaryIds = new Set(primary.map((item) => item.id));
     const mirrorIds = new Set(mirror.map((item) => item.id));
-    for (const item of primary.filter((candidate) => !mirrorIds.has(candidate.id))) await this.mirror.write(item);
+    if (this.primaryAuthoritative && this.mirror.remove) {
+      for (const item of mirror.filter((candidate) => !primaryIds.has(candidate.id))) {
+        await this.mirror.remove(item.id);
+      }
+    }
+    for (const item of primary.filter((candidate) =>
+      this.primaryAuthoritative || !mirrorIds.has(candidate.id))) {
+      await this.mirror.write(item);
+    }
   }
   list(): Promise<CommitmentCandidate[]> { return this.primary.list(); }
   get(id: string): Promise<CommitmentCandidate> { return this.primary.get(id); }

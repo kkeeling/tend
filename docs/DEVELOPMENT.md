@@ -50,6 +50,11 @@ ATTENTION_HOME=.local-tend pnpm tend -- doctor
 
 The doctor output is fully green only while the local API is running.
 
+The first foreground start bootstraps the isolated home. Later `tend cli` commands fast-open its
+ready SQLite runtime and intentionally skip schema migration, recursive permission repair, default
+seeding, and mirror reconciliation. To exercise a first-run or legacy import, use a fresh isolated
+`ATTENTION_HOME`; do not remove readiness metadata from a real home.
+
 For the background runner, use:
 
 ```sh
@@ -128,6 +133,17 @@ pnpm tend:package
 `tend version`, checks `/api/status`, validates the app version, CLI contract version and schema
 version, verifies the built UI is served, confirms core JSON CLI commands work, stops the server,
 and removes the temporary data directory.
+
+For production-scale runtime work, run:
+
+```sh
+pnpm bench:runtime
+```
+
+The benchmark generates private synthetic data only. It verifies the recorded workload dimensions,
+warm single-command and five-reader latency, authenticated workspace reads, realtime propagation
+and coalescing, occupied-port cleanup, and a black-hole preflight deadline. Network, child-process,
+and stream waits have hard deadlines so a failed benchmark cannot become the hang it is measuring.
 
 Use `pnpm tend:package` after the smoke check when preparing a local release archive. It writes
 a platform-specific tarball and checksum under `dist-bin/releases/`. The tarball includes the

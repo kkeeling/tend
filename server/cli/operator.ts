@@ -24,14 +24,29 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
   const root = resolveAppRoot();
   const [command = "help", ...argv] = rawArgs;
   const runtimeRoot = resolveRuntimeRoot(root);
-  await assertCliRuntimeMatchesLive(command, runtimeRoot, {
-    explicitRuntime: Boolean(process.env.ATTENTION_HOME),
+  if (command === "runtime:where") {
+    process.stdout.write(`${JSON.stringify({
+      appRoot: root,
+      runtimeRoot,
+      dataDir: resolveDataDir(root),
+      dbPath: resolveDbPath(root),
+      artifactsDir: resolveArtifactsDir(root),
+    }, null, 2)}\n`);
+    return;
+  }
+  if (command === "help" || command === "--help" || command === "-h" || command === "help:internal") {
+    process.stdout.write(`${JSON.stringify(command === "help:internal"
+      ? { commands: CLI_COMMANDS, internalCommands: INTERNAL_CLI_COMMANDS }
+      : { commands: CLI_COMMANDS }, null, 2)}\n`);
+    return;
+  }
+  const explicitRuntime = Boolean(process.env.ATTENTION_HOME);
+  await assertCliRuntimeMatchesLive(runtimeRoot, {
+    explicitRuntime,
   });
   const dataDir = resolveDataDir(root);
-  const { sqlite, store } = await createLocalRuntime(
-    dataDir,
-    resolveDbPath(root),
-  );
+  const runtime = await createLocalRuntime(dataDir, resolveDbPath(root), { mode: "fast" });
+  const { sqlite, store } = runtime;
   const domain = new AttentionDomain(store);
 
   const value = (name: string) => {
@@ -63,16 +78,13 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
         output = await store.readWorkspace(value("feed"));
         break;
       case "workspace:now":
-        await domain.refreshWorkspacePriorities();
-        output = (await store.readWorkspaceControlPlane()).now;
+        output = await store.readWorkspaceNow();
         break;
       case "workspace:coverage":
-        await domain.refreshWorkspacePriorities();
-        output = (await store.readWorkspaceControlPlane()).coverage;
+        output = await store.readWorkspaceCoverage();
         break;
       case "workspace:priority":
-        await domain.refreshWorkspacePriorities();
-        output = (await store.readWorkspaceControlPlane()).priority;
+        output = await store.readWorkspacePriority();
         break;
       case "workspace:instruct":
         output = await domain.queueWorkspaceInstruction({
@@ -548,15 +560,6 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
           required("resolution"),
         );
         break;
-      case "runtime:where":
-        output = {
-          appRoot: root,
-          runtimeRoot,
-          dataDir,
-          dbPath: resolveDbPath(root),
-          artifactsDir: resolveArtifactsDir(root),
-        };
-        break;
       case "inspect":
         output = await domain.inspectHowFeedWorks(required("feed"));
         break;
@@ -568,19 +571,6 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
         await domain.clearDemo(value("feed"));
         output = { ok: true };
         break;
-      case "help:internal":
-        output = {
-          commands: CLI_COMMANDS,
-          internalCommands: INTERNAL_CLI_COMMANDS,
-        };
-        break;
-      case "--help":
-      case "-h":
-      case "help":
-        output = {
-          commands: CLI_COMMANDS,
-        };
-        break;
       default:
         throw new Error(
           `Unknown Tend CLI command "${command}". Run tend cli help.`,
@@ -589,7 +579,7 @@ export async function runOperatorCli(rawArgs: string[]): Promise<void> {
 
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } finally {
-    sqlite.close();
+    sqlite.close({ checkpoint: false });
   }
 }
 

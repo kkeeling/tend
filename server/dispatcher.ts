@@ -4,7 +4,7 @@ import { effectiveWorkLane } from "../shared/lanes";
 import type { DrainState, ThreadBinding, WorkItem } from "../shared/types";
 import { runAppServerDrain } from "./codexAppServer";
 import type { AttentionStore } from "./store";
-import { appendPrivateText, ensurePrivateDirectory, isoNow } from "./util";
+import { appendPrivateText, ensurePrivateDirectory, isoNow, mapWithConcurrency } from "./util";
 
 declare const Bun: {
   which(binary: string): string | null;
@@ -18,7 +18,9 @@ export interface DispatcherOptions {
   intervalMs?: number;
   minQueueAgeMs?: number;
   activeClaimWindowMs?: number;
-  runDrain?: (feedId: string, threadId: string, prompt: string) => Promise<number>;
+  scanConcurrency?: number;
+  shutdownTimeoutMs?: number;
+  runDrain?: (feedId: string, threadId: string, prompt: string, signal: AbortSignal) => Promise<number>;
   codexAvailable?: () => boolean;
 }
 
@@ -76,27 +78,51 @@ export function shouldDispatch(input: {
 export class DrainDispatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly running = new Set<string>();
-  private readonly options: Required<Pick<DispatcherOptions, "intervalMs" | "minQueueAgeMs" | "activeClaimWindowMs">> & DispatcherOptions;
+  private readonly inFlight = new Set<Promise<void>>();
+  private readonly drainAbortControllers = new Map<string, AbortController>();
+  private stopping = false;
+  private readonly options: Required<Pick<DispatcherOptions, "intervalMs" | "minQueueAgeMs" | "activeClaimWindowMs" | "scanConcurrency" | "shutdownTimeoutMs">> & DispatcherOptions;
 
   constructor(private readonly store: AttentionStore, options: DispatcherOptions) {
     this.options = {
       intervalMs: 20_000,
       minQueueAgeMs: 60_000,
       activeClaimWindowMs: 10 * 60_000,
+      scanConcurrency: 4,
+      shutdownTimeoutMs: 8_000,
       ...options,
     };
   }
 
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => void this.tick().catch((error) => console.error("[dispatcher] tick failed:", error)), this.options.intervalMs);
-    void this.recoverStaleRunning().then(() => this.tick()).catch((error) => console.error("[dispatcher] startup tick failed:", error));
+    this.stopping = false;
+    this.timer = setInterval(() => {
+      this.track(this.tick().catch((error) => console.error("[dispatcher] tick failed:", error)));
+    }, this.options.intervalMs);
+    this.track(this.recoverStaleRunning().then(() => this.tick()).catch((error) => console.error("[dispatcher] startup tick failed:", error)));
     console.log(`[dispatcher] auto-drain watching every ${Math.round(this.options.intervalMs / 1000)}s`);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
+    this.stopping = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    for (const controller of this.drainAbortControllers.values()) controller.abort();
+    const settle = async () => {
+      while (this.inFlight.size) await Promise.all(this.inFlight);
+    };
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    try {
+      await Promise.race([
+        settle(),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error(`Dispatcher shutdown exceeded ${this.options.shutdownTimeoutMs}ms.`)), this.options.shutdownTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
   codexAvailable(): boolean {
@@ -119,11 +145,15 @@ export class DrainDispatcher {
   }
 
   async tick(): Promise<void> {
+    if (this.stopping) return;
+    if (!this.codexAvailable()) return;
     const now = Date.now();
-    for (const feedId of await this.store.listFeedIds()) {
-      const thread = await this.store.readThread(feedId);
-      const work = await this.store.readWorkItems(feedId);
-      const drain = await this.store.readDrainState(feedId);
+    await mapWithConcurrency(await this.store.listFeedIds(), this.options.scanConcurrency, async (feedId) => {
+      const [thread, work, drain] = await Promise.all([
+        this.store.readThread(feedId),
+        this.store.readWorkItems(feedId),
+        this.store.readDrainState(feedId),
+      ]);
       const decision = shouldDispatch({
         now,
         work,
@@ -132,14 +162,16 @@ export class DrainDispatcher {
         minQueueAgeMs: this.options.minQueueAgeMs,
         activeClaimWindowMs: this.options.activeClaimWindowMs,
       });
-      if (!decision || !this.codexAvailable()) continue;
+      if (!decision) return;
       await this.dispatch(feedId, thread.homeThreadId as string, decision);
-    }
+    });
   }
 
   private async dispatch(feedId: string, threadId: string, decision: DrainDecision): Promise<void> {
-    if (this.running.has(feedId)) return;
+    if (this.stopping || this.running.has(feedId)) return;
     this.running.add(feedId);
+    const abortController = new AbortController();
+    this.drainAbortControllers.set(feedId, abortController);
     const prompt = drainPrompt(feedId, threadId);
     const startedAt = isoNow();
     try {
@@ -150,22 +182,35 @@ export class DrainDispatcher {
       });
     } catch (error) {
       this.running.delete(feedId);
+      this.drainAbortControllers.delete(feedId);
       throw error;
     }
-    void this.runAndSettle(feedId, threadId, prompt, startedAt).catch((error) => console.error(`[dispatcher] drain ${feedId} settle failed:`, error));
+    if (this.stopping) abortController.abort();
+    this.track(this.runAndSettle(feedId, threadId, prompt, startedAt, abortController.signal)
+      .catch((error) => console.error(`[dispatcher] drain ${feedId} settle failed:`, error)));
   }
 
-  private async runAndSettle(feedId: string, threadId: string, prompt: string, startedAt: string): Promise<void> {
+  private track(task: Promise<void>): void {
+    this.inFlight.add(task);
+    void task.finally(() => this.inFlight.delete(task));
+  }
+
+  private async runAndSettle(feedId: string, threadId: string, prompt: string, startedAt: string, signal: AbortSignal): Promise<void> {
     let exitCode = -1;
     let failureDetail: string | undefined;
     try {
-      exitCode = await (this.options.runDrain
-        ? this.options.runDrain(feedId, threadId, prompt)
-        : this.spawnCodexDrain(feedId, threadId, prompt));
+      if (signal.aborted) {
+        failureDetail = "Drain cancelled during Tend shutdown.";
+      } else {
+        exitCode = await (this.options.runDrain
+          ? this.options.runDrain(feedId, threadId, prompt, signal)
+          : this.spawnCodexDrain(feedId, threadId, prompt, signal));
+      }
     } catch (error) {
       failureDetail = error instanceof Error ? error.message : String(error);
     } finally {
       this.running.delete(feedId);
+      this.drainAbortControllers.delete(feedId);
     }
     const succeeded = exitCode === 0 && !failureDetail;
     await this.store.serialize(async () => {
@@ -189,14 +234,18 @@ export class DrainDispatcher {
     });
   }
 
-  private async spawnCodexDrain(feedId: string, threadId: string, prompt: string): Promise<number> {
+  private async spawnCodexDrain(feedId: string, threadId: string, prompt: string, signal: AbortSignal): Promise<number> {
+    if (signal.aborted) return 1;
     const logFile = await this.prepareLog(feedId);
+    if (signal.aborted) return 1;
     await appendPrivateText(logFile, `\n===== drain ${isoNow()} thread=${threadId} =====\n`);
+    if (signal.aborted) return 1;
     return runAppServerDrain({
       threadId,
       prompt,
       cwd: this.options.appRoot,
       writableRoots: [this.options.runtimeRoot],
+      signal,
       log: (line) => appendPrivateText(logFile, `${line}\n`),
     });
   }

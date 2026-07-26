@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { shouldDispatch } from "../server/dispatcher";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { DrainDispatcher, shouldDispatch } from "../server/dispatcher";
+import { runAppServerDrain } from "../server/codexAppServer";
+import { AttentionStore } from "../server/store";
 import type { DrainState, ThreadBinding, WorkAgent, WorkItem, WorkStatus } from "../shared/types";
 
 const NOW = Date.parse("2026-07-05T12:00:00.000Z");
@@ -105,4 +110,74 @@ describe("shouldDispatch", () => {
 
     expect(decision).toEqual({ feedId: "inbox", reason: "queued_work", queued: 2, oldestQueuedAt: OLDER });
   });
+});
+
+test("dispatcher shutdown aborts and settles an active drain within its service budget", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "tend-dispatcher-stop-"));
+  const store = new AttentionStore(root);
+  await store.init();
+  await store.writeThread("inbox", thread());
+  await store.writeWork(workItem({ id: "shutdown", createdAt: OLDER }));
+  let observedSignal: AbortSignal | undefined;
+  const dispatcher = new DrainDispatcher(store, {
+    appRoot: root,
+    runtimeRoot: root,
+    minQueueAgeMs: 0,
+    shutdownTimeoutMs: 1_000,
+    codexAvailable: () => true,
+    runDrain: async (_feedId, _threadId, _prompt, signal) => {
+      observedSignal = signal;
+      if (signal.aborted) return 1;
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      return 1;
+    },
+  });
+  try {
+    await dispatcher.tick();
+    for (let attempt = 0; attempt < 20 && !observedSignal; attempt += 1) await Bun.sleep(5);
+    expect(observedSignal).toBeDefined();
+    const startedAt = performance.now();
+    await dispatcher.stop();
+    expect(observedSignal?.aborted).toBe(true);
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a pre-aborted app-server drain never spawns or waits for its timeout", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const startedAt = performance.now();
+  const exitCode = await runAppServerDrain({
+    threadId: "thread-never-launched",
+    prompt: "Do not run.",
+    cwd: process.cwd(),
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    argv: ["/definitely/not/a/real/codex-binary"],
+  });
+  expect(exitCode).toBe(1);
+  expect(performance.now() - startedAt).toBeLessThan(100);
+});
+
+test("an app-server drain force-kills a TERM-resistant child and bounds stream cleanup", async () => {
+  const never = new Promise<void>(() => {});
+  const startedAt = performance.now();
+  const exitCode = await runAppServerDrain({
+    threadId: "thread-stubborn-child",
+    prompt: "This helper intentionally never reads the request.",
+    cwd: process.cwd(),
+    timeoutMs: 25,
+    terminationGraceMs: 25,
+    streamDrainGraceMs: 25,
+    argv: [
+      process.execPath,
+      "-e",
+      "process.on('SIGTERM',()=>{});process.stderr.write('stubborn-stream\\n');setInterval(()=>{},1000)",
+    ],
+    log: (line) => line.startsWith("[app-server:err]") ? never : undefined,
+  });
+  expect(exitCode).toBe(1);
+  expect(performance.now() - startedAt).toBeLessThan(500);
 });

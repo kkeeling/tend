@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import type { PriorityRuleProposal, PriorityRuleSet } from "../../shared/types";
 import type { MirrorWriteCoordinator } from "./mirrorWrites";
@@ -10,9 +10,11 @@ export interface PriorityRuleRepository {
   listRuleSets(): Promise<PriorityRuleSet[]>;
   active(): Promise<PriorityRuleSet | null>;
   writeRuleSet(ruleSet: PriorityRuleSet): Promise<void>;
+  removeRuleSet?(id: string): Promise<void>;
   listProposals(): Promise<PriorityRuleProposal[]>;
   getProposal(id: string): Promise<PriorityRuleProposal>;
   writeProposal(proposal: PriorityRuleProposal): Promise<void>;
+  removeProposal?(id: string): Promise<void>;
 }
 
 export class FilePriorityRuleRepository implements PriorityRuleRepository {
@@ -21,12 +23,14 @@ export class FilePriorityRuleRepository implements PriorityRuleRepository {
   async listRuleSets(): Promise<PriorityRuleSet[]> { return this.readDirectory<PriorityRuleSet>("rules"); }
   async active(): Promise<PriorityRuleSet | null> { return (await this.listRuleSets()).find((item) => item.status === "active") ?? null; }
   async writeRuleSet(ruleSet: PriorityRuleSet): Promise<void> { await writeJson(this.file("rules", ruleSet.id), ruleSet); }
+  async removeRuleSet(id: string): Promise<void> { await rm(this.file("rules", id), { force: true }); }
   async listProposals(): Promise<PriorityRuleProposal[]> { return this.readDirectory<PriorityRuleProposal>("proposals"); }
   async getProposal(id: string): Promise<PriorityRuleProposal> {
     if (!existsSync(this.file("proposals", id))) throw new Error(`Priority rule proposal not found: ${id}`);
     return readJson<PriorityRuleProposal>(this.file("proposals", id));
   }
   async writeProposal(proposal: PriorityRuleProposal): Promise<void> { await writeJson(this.file("proposals", proposal.id), proposal); }
+  async removeProposal(id: string): Promise<void> { await rm(this.file("proposals", id), { force: true }); }
   private async readDirectory<T>(kind: string): Promise<T[]> {
     const dir = path.join(this.dataDir, "workspace", "priority", kind);
     if (!existsSync(dir)) return [];
@@ -40,15 +44,34 @@ export class MirroredPriorityRuleRepository implements PriorityRuleRepository {
     private readonly primary: PriorityRuleRepository,
     private readonly mirror: PriorityRuleRepository,
     private readonly mirrorWrites?: MirrorWriteCoordinator,
+    private readonly primaryAuthoritative = false,
   ) {}
   async init(): Promise<void> {
     await this.primary.init(); await this.mirror.init();
     const primaryRules = await this.primary.listRuleSets(); const mirrorRules = await this.mirror.listRuleSets();
+    const primaryRuleIds = new Set(primaryRules.map((item) => item.id));
     const mirrorRuleIds = new Set(mirrorRules.map((item) => item.id));
-    for (const item of primaryRules.filter((rule) => !mirrorRuleIds.has(rule.id))) await this.mirror.writeRuleSet(item);
+    if (this.primaryAuthoritative && this.mirror.removeRuleSet) {
+      for (const item of mirrorRules.filter((rule) => !primaryRuleIds.has(rule.id))) {
+        await this.mirror.removeRuleSet(item.id);
+      }
+    }
+    for (const item of primaryRules.filter((rule) =>
+      this.primaryAuthoritative || !mirrorRuleIds.has(rule.id))) {
+      await this.mirror.writeRuleSet(item);
+    }
     const primaryProposals = await this.primary.listProposals(); const mirrorProposals = await this.mirror.listProposals();
+    const primaryProposalIds = new Set(primaryProposals.map((item) => item.id));
     const mirrorProposalIds = new Set(mirrorProposals.map((item) => item.id));
-    for (const item of primaryProposals.filter((proposal) => !mirrorProposalIds.has(proposal.id))) await this.mirror.writeProposal(item);
+    if (this.primaryAuthoritative && this.mirror.removeProposal) {
+      for (const item of mirrorProposals.filter((proposal) => !primaryProposalIds.has(proposal.id))) {
+        await this.mirror.removeProposal(item.id);
+      }
+    }
+    for (const item of primaryProposals.filter((proposal) =>
+      this.primaryAuthoritative || !mirrorProposalIds.has(proposal.id))) {
+      await this.mirror.writeProposal(item);
+    }
   }
   listRuleSets(): Promise<PriorityRuleSet[]> { return this.primary.listRuleSets(); }
   active(): Promise<PriorityRuleSet | null> { return this.primary.active(); }

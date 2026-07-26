@@ -1,10 +1,10 @@
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
   }
 }
 
-let mutationTokenPromise: Promise<string> | null = null;
+let mutationToken: string | null = null;
 
 export async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -15,35 +15,42 @@ export async function api<T>(url: string, init?: RequestInit): Promise<T> {
 
 export async function post<T>(url: string, value: unknown = {}): Promise<T> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const mutationToken = await localMutationToken();
+    const currentMutationToken = await localMutationToken();
     try {
       return await api<T>(url, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-attention-mutation-token": mutationToken,
+          "x-attention-mutation-token": currentMutationToken,
         },
         body: JSON.stringify(value),
       });
     } catch (error) {
       if (!(error instanceof ApiError) || error.status !== 403 || attempt > 0) throw error;
-      mutationTokenPromise = null;
+      mutationToken = null;
     }
   }
   throw new Error("Local mutation authorization failed.");
 }
 
-export async function localRead<T>(url: string): Promise<T> {
-  const token = await localMutationToken();
-  return api<T>(url, { headers: { "x-attention-read-token": token } });
+export async function localRead<T>(url: string, init: RequestInit = {}): Promise<T> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const token = await localMutationToken(init.signal);
+    const headers = new Headers(init.headers);
+    headers.set("x-attention-read-token", token);
+    try {
+      return await api<T>(url, { ...init, headers });
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 403 || attempt > 0) throw error;
+      mutationToken = null;
+    }
+  }
+  throw new Error("Local read authorization failed.");
 }
 
-function localMutationToken(): Promise<string> {
-  mutationTokenPromise ??= api<{ mutationToken: string }>("/api/session")
-    .then((session) => session.mutationToken)
-    .catch((error) => {
-      mutationTokenPromise = null;
-      throw error;
-    });
-  return mutationTokenPromise;
+async function localMutationToken(signal?: AbortSignal | null): Promise<string> {
+  if (mutationToken) return mutationToken;
+  const session = await api<{ mutationToken: string }>("/api/session", { signal });
+  mutationToken = session.mutationToken;
+  return mutationToken;
 }

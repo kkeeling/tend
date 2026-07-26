@@ -134,6 +134,126 @@ describe("mobile sync worker", () => {
     expect((await store.readWorkItems("inbox")).filter((work) => work.sourceMobileCommandId === RETRY_COMMAND_ID)).toHaveLength(1);
     expect(cloud.completed.filter((item) => item.id === RETRY_COMMAND_ID)).toHaveLength(2);
   });
+
+  test("aborts a stalled cloud request during bounded shutdown", async () => {
+    const { store, domain } = await setup();
+    let started!: () => void;
+    const requestStarted = new Promise<void>((resolve) => { started = resolve; });
+    let aborted = false;
+    const cloud: MobileCloudClient = {
+      async replaceSnapshot(_snapshot, signal) {
+        started();
+        await new Promise<void>((resolve) => signal?.addEventListener("abort", () => {
+          aborted = true;
+          resolve();
+        }, { once: true }));
+      },
+      async claimCommands() {
+        return [];
+      },
+      async completeCommand() {},
+      async syncCommandProgress() {},
+    };
+    const worker = new MobileSyncWorker(store, domain, cloud, { shutdownTimeoutMs: 250 });
+
+    void worker.runOnce();
+    await requestStarted;
+    const startedAt = performance.now();
+    await worker.stop();
+
+    expect(aborted).toBe(true);
+    expect(performance.now() - startedAt).toBeLessThan(250);
+  });
+
+  test("does not apply commands returned after shutdown aborts a claim", async () => {
+    const { store, domain } = await setup();
+    const projection = (await projectMobileWorkspace(store)).cards.find((card) => card.cardId === "phone-review")!;
+    const command: MobileCommand = {
+      id: SYNC_COMMAND_ID,
+      userId: "user-1",
+      clientRequestId: "request-after-stop",
+      deviceId: "iphone",
+      feedId: "inbox",
+      cardId: "phone-review",
+      feedGeneration: projection.feedGeneration,
+      expectedCardDigest: projection.cardDigest,
+      kind: "instruction",
+      instruction: "This must not be applied after shutdown.",
+      state: "claimed",
+      createdAt: "2026-06-13T18:00:00.000Z",
+      availableAt: "2026-06-13T18:00:00.000Z",
+    };
+    let claimStarted!: () => void;
+    const started = new Promise<void>((resolve) => { claimStarted = resolve; });
+    let releaseClaim!: (commands: MobileCommand[]) => void;
+    const claimed = new Promise<MobileCommand[]>((resolve) => { releaseClaim = resolve; });
+    let applyCount = 0;
+    const originalApply = domain.applyMobileCommand.bind(domain);
+    domain.applyMobileCommand = async (input) => {
+      applyCount += 1;
+      return originalApply(input);
+    };
+    const cloud: MobileCloudClient = {
+      async replaceSnapshot() {},
+      async claimCommands() {
+        claimStarted();
+        return claimed;
+      },
+      async completeCommand() {},
+      async syncCommandProgress() {},
+    };
+    const worker = new MobileSyncWorker(store, domain, cloud, { shutdownTimeoutMs: 250 });
+
+    const run = worker.runOnce();
+    await started;
+    const stopping = worker.stop();
+    releaseClaim([command]);
+    await stopping;
+    await run;
+
+    expect(applyCount).toBe(0);
+    expect((await store.readWorkItems("inbox")).filter((work) => work.sourceMobileCommandId === command.id)).toEqual([]);
+  });
+
+  test("reports a bounded shutdown failure while a local command mutation is still running", async () => {
+    const { store, domain } = await setup();
+    const projection = (await projectMobileWorkspace(store)).cards.find((card) => card.cardId === "phone-review")!;
+    const cloud = new FakeCloud();
+    cloud.commands.push({
+      id: SYNC_COMMAND_ID,
+      userId: "user-1",
+      clientRequestId: "request-hung-apply",
+      deviceId: "iphone",
+      feedId: "inbox",
+      cardId: "phone-review",
+      feedGeneration: projection.feedGeneration,
+      expectedCardDigest: projection.cardDigest,
+      kind: "instruction",
+      instruction: "Wait for the local apply.",
+      state: "claimed",
+      createdAt: "2026-06-13T18:00:00.000Z",
+      availableAt: "2026-06-13T18:00:00.000Z",
+    });
+    let applyStarted!: () => void;
+    const started = new Promise<void>((resolve) => { applyStarted = resolve; });
+    let releaseApply!: () => void;
+    const released = new Promise<void>((resolve) => { releaseApply = resolve; });
+    const originalApply = domain.applyMobileCommand.bind(domain);
+    domain.applyMobileCommand = async (command) => {
+      applyStarted();
+      await released;
+      return originalApply(command);
+    };
+    const worker = new MobileSyncWorker(store, domain, cloud, { shutdownTimeoutMs: 25 });
+
+    const run = worker.runOnce();
+    await started;
+    await expect(worker.stop()).rejects.toThrow("shutdown exceeded 25ms");
+    releaseApply();
+    await run;
+
+    expect(cloud.completed).toEqual([]);
+  });
 });
 
 describe("mobile cloud configuration", () => {

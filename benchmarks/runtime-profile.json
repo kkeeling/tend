@@ -1,0 +1,48 @@
+{
+  "version": 2,
+  "capturedAt": "2026-07-26",
+  "redacted": true,
+  "description": "Privacy-safe lower bounds from the live personal Tend runtime. No source content, identities, tokens, or card text are retained.",
+  "minimum": {
+    "feeds": 5,
+    "sources": 11,
+    "sourceRuns": 3500,
+    "sourceAttempts": 3700,
+    "sweepBatches": 2200,
+    "cards": 150,
+    "feedEvents": 8400,
+    "priorityLedger": 220,
+    "workItems": 150,
+    "databaseBytes": 30000000,
+    "runtimeBytes": 65000000,
+    "runtimeFiles": 11000,
+    "maxDirectoryDepth": 6,
+    "mirrorFiles": 6000,
+    "sourceRunMirrorFiles": 3500,
+    "cardMirrorFiles": 150,
+    "sweepMirrorFiles": 2200,
+    "workMirrorFiles": 150,
+    "sourceRunPayloadP50Bytes": 240,
+    "sourceRunPayloadP95Bytes": 1400,
+    "sourceRunPayloadMaxBytes": 16000,
+    "cardPayloadP50Bytes": 3200,
+    "cardPayloadP95Bytes": 7500,
+    "cardPayloadMaxBytes": 11000,
+    "eventPayloadP50Bytes": 140,
+    "eventPayloadP95Bytes": 5000,
+    "eventPayloadMaxBytes": 59000
+  },
+  "sqlite": {
+    "journalMode": "wal",
+    "pageSize": 4096,
+    "walState": "inactive"
+  },
+  "automationCommandMixMinimum": {
+    "automations": 5,
+    "health": 5,
+    "inspect": 4,
+    "workList": 5,
+    "workClaim": 5,
+    "imessageCollect": 1
+  }
+}

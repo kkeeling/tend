@@ -25,6 +25,13 @@ flowchart LR
 
 The current domain model keeps the richest authoring artifacts readable in local file mirrors while moving active runtime records into SQLite. Active feed membership, editable prompt/policy documents, feed cards, routine action groups, source recipes/checkpoints, source profiles and attempts, source run records, canonical commitments and signal links, priority rules and ledger entries, sweep state/artifacts, revision records, feed audit events, and work items are behind repository interfaces with SQLite as the runtime authority and readable files as backup-compatible mirrors.
 
+Runtime initialization has two explicit modes. Service startup and maintenance paths bootstrap an
+unready home: they migrate schema, import legacy mirrors, reconcile derived files, seed defaults,
+repair private permissions, and publish a readiness generation only after all of that succeeds.
+Steady-state CLI commands use fast open, which requires a compatible ready database and performs no
+recursive permission walk, DDL, seed, or mirror reconciliation. A fast open that finds an unready
+home fails closed into the bootstrap path rather than partially initializing it.
+
 ## Life Control Plane
 
 `/now` is a workspace projection over normal feed-owned cards. It never creates a global execution
@@ -46,10 +53,12 @@ approved-blocked owner work. Typed completion evidence drives `completion_pendin
 `reopened`, while source edits, deletion, retraction, and conflict append history and resurface the
 owner card. Prior signal evidence is retained for audit and correction.
 
-SQLite is authoritative for life-control-plane records. File mirrors publish only after the
-enclosing transaction commits, and a failed mirror write rolls the transaction back. On restart,
-these newer records are not imported back from an orphan mirror, preventing a rolled-back write
-from becoming authoritative later.
+SQLite is authoritative for life-control-plane records. File mirrors publish after the enclosing
+transaction commits. A post-commit mirror failure records durable repair-required state; the
+committed SQLite result remains authoritative and the next bootstrap reconciles the derived file.
+Explicit repair rewrites stale mutable mirrors and removes records that exist only in the mirror.
+Normal restarts never import an orphan mirror over a valid database, preventing stale files from
+resurrecting deleted or rolled-back state.
 
 External action authority remains feed-local and digest-bound. Tend verifies a provider-neutral
 execution identity, nonce/grant, assurance level, current card owner, editable artifact, and current
@@ -101,12 +110,16 @@ Realtime is intentionally simple:
 
 ```text
 mutation commits
-→ /api/events emits change
-→ RealtimeProvider invalidates TanStack Query
-→ UI refetches workspace state
+-> SQLite advances a durable feed/workspace generation
+-> the cursor bridge emits one /api/events doorbell
+-> RealtimeProvider keeps one active and one trailing refresh
+-> TanStack Query refetches the affected canonical workspace slice
 ```
 
-No patch stream is required for v0.
+HTTP, scheduled, and out-of-process CLI mutations share that cursor authority, so a direct request
+cannot be echoed later by the polling bridge. Query cancellation reaches the underlying fetch.
+During reconnect or a failed refresh, the browser keeps last-known-good data visibly stale and
+blocks mutations until a canonical read succeeds. No patch stream is required for v0.
 
 ## Native Mobile Bridge
 

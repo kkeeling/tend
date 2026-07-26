@@ -25,10 +25,11 @@ export function apiRoutes(context: LocalRouteContext): Hono {
   });
   app.get("/api/status", (c) => c.json({ ok: true, version: versionInfo(), dataDir, sqlite: sqlite.status() }));
   app.get("/api/state", async (c) => c.json(await store.readWorkspace(c.req.query("feed") ?? "inbox")));
-  app.get("/api/workspace", async (c) => { await domain.refreshWorkspacePriorities(); return c.json(await store.readWorkspaceControlPlane()); });
-  app.get("/api/workspace/now", async (c) => { await domain.refreshWorkspacePriorities(); return c.json((await store.readWorkspaceControlPlane()).now); });
-  app.get("/api/workspace/coverage", async (c) => { await domain.refreshWorkspacePriorities(); return c.json((await store.readWorkspaceControlPlane()).coverage); });
-  app.get("/api/workspace/priority", async (c) => { await domain.refreshWorkspacePriorities(); return c.json((await store.readWorkspaceControlPlane()).priority); });
+  app.get("/api/workspace", async (c) => c.json(await store.readWorkspaceControlPlane()));
+  app.get("/api/workspace/now", async (c) => c.json(await store.readWorkspaceNow()));
+  app.get("/api/workspace/now-surface", async (c) => c.json(await store.readWorkspaceNowSurface()));
+  app.get("/api/workspace/coverage", async (c) => c.json(await store.readWorkspaceCoverage()));
+  app.get("/api/workspace/priority", async (c) => c.json(await store.readWorkspacePriority()));
   app.get("/api/health", (c) => c.json({ ok: true }));
   app.get("/api/mobile/status", (c) => c.json(mobileStatus?.() ?? { enabled: false }));
   app.get("/api/mind-context/current", async (c) => {

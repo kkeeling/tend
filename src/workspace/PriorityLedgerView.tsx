@@ -3,12 +3,18 @@ import type { WorkspaceControlPlane } from "../types";
 export function PriorityLedgerView({
   priority,
   onApprove,
+  mutationsDisabled = false,
+  pendingProposalIds = new Set(),
+  busy = false,
 }: {
   priority: WorkspaceControlPlane["priority"];
   onApprove: (proposalId: string) => void;
+  mutationsDisabled?: boolean;
+  pendingProposalIds?: ReadonlySet<string>;
+  busy?: boolean;
 }) {
   return (
-    <main className="control-page" aria-labelledby="ledger-title">
+    <main className="control-page" aria-labelledby="ledger-title" aria-busy={busy}>
       <header className="control-hero">
         <div><span className="panel-kicker">Append-only decisions</span><h1 id="ledger-title">Priority Ledger</h1><p>Every material ordering, correction, override, and rule approval remains traceable.</p></div>
         <div className="rule-version"><span>Active rules</span><b>{priority.activeRules ? `v${priority.activeRules.version}` : "Not configured"}</b></div>
@@ -17,7 +23,14 @@ export function PriorityLedgerView({
         <article className="rule-proposal" key={proposal.id}>
           <span>Rule change proposed from v{proposal.baseVersion}</span><h2>{proposal.reason}</h2>
           <p>No future ordering changes until this exact proposal is approved.</p>
-          <button className="button primary" onClick={() => onApprove(proposal.id)}>Approve exact rule change</button>
+          <button
+            className="button primary"
+            aria-busy={pendingProposalIds.has(proposal.id)}
+            disabled={mutationsDisabled || pendingProposalIds.has(proposal.id)}
+            onClick={() => onApprove(proposal.id)}
+          >
+            {pendingProposalIds.has(proposal.id) ? "Approving…" : "Approve exact rule change"}
+          </button>
         </article>
       ))}
       <ol className="ledger-list">

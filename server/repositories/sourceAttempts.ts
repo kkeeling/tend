@@ -8,6 +8,11 @@ import { appendPrivateText } from "../util";
 export interface SourceAttemptRepository {
   init(feedIds: string[]): Promise<void>;
   list(feedId: string, sourceId?: string): Promise<SourceAttempt[]>;
+  listForCoverage(
+    feedId: string,
+    sourceIds: string[],
+    qualifies: (attempt: SourceAttempt) => boolean,
+  ): Promise<SourceAttempt[]>;
   append(attempt: SourceAttempt): Promise<void>;
 }
 
@@ -27,6 +32,15 @@ export class FileSourceAttemptRepository implements SourceAttemptRepository {
     const lines = (await readFile(file, "utf8")).split("\n").filter(Boolean);
     const attempts = lines.map((line) => JSON.parse(line) as SourceAttempt);
     return attempts.filter((attempt) => sourceId === undefined || attempt.sourceId === sourceId);
+  }
+
+  async listForCoverage(
+    feedId: string,
+    sourceIds: string[],
+    qualifies: (attempt: SourceAttempt) => boolean,
+  ): Promise<SourceAttempt[]> {
+    const attempts = await this.list(feedId);
+    return coverageAttempts(attempts, sourceIds, qualifies);
   }
 
   async append(attempt: SourceAttempt): Promise<void> {
@@ -72,6 +86,14 @@ export class MirroredSourceAttemptRepository implements SourceAttemptRepository 
     return this.primary.list(feedId, sourceId);
   }
 
+  listForCoverage(
+    feedId: string,
+    sourceIds: string[],
+    qualifies: (attempt: SourceAttempt) => boolean,
+  ): Promise<SourceAttempt[]> {
+    return this.primary.listForCoverage(feedId, sourceIds, qualifies);
+  }
+
   async append(attempt: SourceAttempt): Promise<void> {
     await this.primary.append(attempt);
     if (this.mirrorWrites) await this.mirrorWrites.write(() => this.mirror.append(attempt));
@@ -84,4 +106,22 @@ export class MirroredSourceAttemptRepository implements SourceAttemptRepository 
     const mirrorIds = new Set(mirror.map((item) => item.id));
     for (const attempt of primary.filter((item) => !mirrorIds.has(item.id))) await this.mirror.append(attempt);
   }
+}
+
+function coverageAttempts(
+  attempts: SourceAttempt[],
+  sourceIds: string[],
+  qualifies: (attempt: SourceAttempt) => boolean,
+): SourceAttempt[] {
+  const selected = new Map<string, SourceAttempt>();
+  for (const sourceId of sourceIds) {
+    const sourceAttempts = attempts
+      .filter((attempt) => attempt.sourceId === sourceId)
+      .sort((left, right) => right.completedAt.localeCompare(left.completedAt) || right.id.localeCompare(left.id));
+    const latest = sourceAttempts[0];
+    const latestGood = sourceAttempts.find(qualifies);
+    if (latest) selected.set(latest.id, latest);
+    if (latestGood) selected.set(latestGood.id, latestGood);
+  }
+  return [...selected.values()];
 }

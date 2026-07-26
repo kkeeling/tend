@@ -1,5 +1,10 @@
 import type { CardAction, WorkspaceControlPlane, WorkspaceNowItem } from "../types";
 import { CardView } from "../feed/CardView";
+import { workspaceItemKey } from "./workspaceKeys";
+import {
+  defaultWorkspaceContinuityStore,
+  type WorkspaceContinuityStore,
+} from "./continuityStore";
 
 export function NowView({
   control,
@@ -8,16 +13,24 @@ export function NowView({
   onAction,
   onChanged,
   onReturnToReview,
+  pendingActionKeys = new Set(),
+  mutationsDisabled = false,
+  busy = false,
+  continuityStore = defaultWorkspaceContinuityStore,
 }: {
-  control: WorkspaceControlPlane;
+  control: Pick<WorkspaceControlPlane, "now" | "coverage">;
   activeId: string | null;
   onActivate: (item: WorkspaceNowItem) => void;
   onAction: (item: WorkspaceNowItem, action: CardAction) => void;
   onChanged: () => void;
   onReturnToReview: (item: WorkspaceNowItem) => void;
+  pendingActionKeys?: ReadonlySet<string>;
+  mutationsDisabled?: boolean;
+  busy?: boolean;
+  continuityStore?: WorkspaceContinuityStore;
 }) {
   return (
-    <main className="control-page now-page" aria-labelledby="now-title">
+    <main className="control-page now-page" aria-labelledby="now-title" aria-busy={busy}>
       <header className="control-hero">
         <div>
           <span className="panel-kicker">Life control plane</span>
@@ -36,8 +49,10 @@ export function NowView({
         </section>
       ) : (
         <div className="now-stack">
-          {control.now.items.map((item) => (
-            <section className="workspace-now-item" key={item.id} aria-label={`Priority ${item.priority.rank}: ${item.card.title}`}>
+          {control.now.items.map((item) => {
+            const itemMutationPending = pendingActionKeys.has(workspaceItemKey(item));
+            return (
+             <section className="workspace-now-item" key={item.id} aria-label={`Priority ${item.priority.rank}: ${item.card.title}`}>
               <div className="priority-explanation">
                 <span>#{item.priority.rank}</span>
                 <div>
@@ -70,10 +85,14 @@ export function NowView({
                 onActivate={() => onActivate(item)}
                 onChanged={onChanged}
                 onAction={(action) => onAction(item, action)}
+                isActionPending={() => mutationsDisabled || pendingActionKeys.has(workspaceItemKey(item))}
                 onReturnToReview={() => onReturnToReview(item)}
+                mutationsDisabled={mutationsDisabled || itemMutationPending}
+                continuityStore={continuityStore}
               />
-            </section>
-          ))}
+             </section>
+            );
+          })}
         </div>
       )}
     </main>

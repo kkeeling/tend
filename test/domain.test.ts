@@ -972,8 +972,13 @@ describe("thread-owned work drain", () => {
     const { domain } = await setup();
     await domain.bindFeed("company-attention", "thread-company");
     const first = await domain.queueInstruction("company-attention", "company-source-confirmation", "Inspect source options.");
-    await domain.seedDemo();
-    await domain.queueInstruction("company-attention", "demo-company-models", "Draft the feed recipe.");
+    await domain.upsertCard("company-attention", {
+      id: "claim-replay-second",
+      title: "Second queued item",
+      why: "The replay assertion needs another eligible item.",
+      blocks: [],
+    });
+    await domain.queueInstruction("company-attention", "claim-replay-second", "Draft the feed recipe.");
     expect((await domain.claimWork("company-attention", "thread-company"))?.id).toBe(first.id);
     expect((await domain.claimWork("company-attention", "thread-company"))?.id).toBe(first.id);
   });

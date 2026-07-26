@@ -12,13 +12,32 @@ export function createRealtimeHub() {
       const app = new Hono();
       app.get("/api/events", (c) =>
         streamSSE(c, async (stream) => {
-          let active = true;
-          const send = (data: unknown) => void stream.writeSSE({ event: "change", data: JSON.stringify(data) });
-          listeners.add(send);
-          await stream.writeSSE({ event: "ready", data: "{}" });
-          while (active && !stream.closed) await stream.sleep(15_000);
-          active = false;
-          listeners.delete(send);
+          const pending: unknown[] = [];
+          let wake: (() => void) | null = null;
+          const enqueue = (data: unknown) => {
+            pending[0] = data;
+            pending.length = 1;
+            wake?.();
+            wake = null;
+          };
+          listeners.add(enqueue);
+          try {
+            await stream.writeSSE({ event: "ready", data: "{}" });
+            while (!stream.closed) {
+              if (pending.length === 0) {
+                await Promise.race([
+                  new Promise<void>((resolve) => { wake = resolve; }),
+                  stream.sleep(15_000),
+                ]);
+                wake = null;
+              }
+              if (stream.closed) break;
+              const next = pending.shift();
+              if (next !== undefined) await stream.writeSSE({ event: "change", data: JSON.stringify(next) });
+            }
+          } finally {
+            listeners.delete(enqueue);
+          }
         }),
       );
       return app;

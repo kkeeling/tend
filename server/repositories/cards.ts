@@ -57,6 +57,7 @@ export class MirroredCardRepository implements CardRepository {
     private readonly primary: CardRepository,
     private readonly mirror: CardRepository,
     private readonly mirrorWrites?: MirrorWriteCoordinator,
+    private readonly primaryAuthoritative = false,
   ) {}
 
   async init(feedIds: string[]): Promise<void> {
@@ -92,7 +93,8 @@ export class MirroredCardRepository implements CardRepository {
     const mirror = await this.mirror.list(feedId);
     const primaryIds = new Set(primary.map((card) => card.id));
     for (const card of mirror.filter((item) => !primaryIds.has(item.id))) {
-      await this.primary.write(card);
+      if (this.primaryAuthoritative) await this.mirror.remove(feedId, card.id);
+      else await this.primary.write(card);
     }
     for (const card of primary) {
       await this.mirror.write(card);

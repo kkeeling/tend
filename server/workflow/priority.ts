@@ -3,6 +3,7 @@ import { digest } from "../util";
 
 const consequenceScore = { low: 0, medium: 100, high: 250, severe: 500 } as const;
 const DOMAIN_TIER_SCORE = 10_000;
+const DUE_BAND_THRESHOLDS_MINUTES = [0, 60, 24 * 60, 7 * 24 * 60];
 export const DEFAULT_PRIORITY_JUDGMENT_POLICY_VERSION = "priority-v1";
 export const PRIORITY_RECIPE = "Rank by approved domain order, then bounded urgency, consequence, certainty, and blocked state; allow only the configured imminent or high-consequence lower-domain override.";
 export const PRIORITY_RECIPE_DIGEST = digest(PRIORITY_RECIPE);
@@ -43,6 +44,26 @@ function dueBand(dueAt: string | undefined, now: Date): { label: string; score: 
   if (minutes <= 24 * 60) return { label: "due within a day", score: 600, minutes };
   if (minutes <= 7 * 24 * 60) return { label: "due within a week", score: 300, minutes };
   return { label: "due later", score: 100, minutes };
+}
+
+export function nextPriorityBoundaryAt(
+  dueDates: Array<string | undefined>,
+  imminentWithinMinutes: number,
+  now: Date,
+): Date | null {
+  const nowMs = now.getTime();
+  const thresholds = new Set([...DUE_BAND_THRESHOLDS_MINUTES, imminentWithinMinutes]);
+  let nextMs = Number.POSITIVE_INFINITY;
+  for (const dueAt of dueDates) {
+    if (!dueAt) continue;
+    const dueMs = Date.parse(dueAt);
+    if (!Number.isFinite(dueMs)) continue;
+    for (const threshold of thresholds) {
+      const transitionMs = dueMs - (threshold + 1) * 60_000 + 1;
+      if (transitionMs > nowMs && transitionMs < nextMs) nextMs = transitionMs;
+    }
+  }
+  return Number.isFinite(nextMs) ? new Date(nextMs) : null;
 }
 
 export function evaluatePriorityRows(

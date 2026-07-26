@@ -6,7 +6,9 @@ import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import App from "../src/App";
 import type { Card, FeedView, WorkspaceView } from "../shared/types";
 
-GlobalRegistrator.register();
+const originalFetch = globalThis.fetch;
+const originalEventSource = globalThis.EventSource;
+registerHappyDom();
 
 class StubEventSource {
   onerror: ((event: Event) => void) | null = null;
@@ -15,8 +17,19 @@ class StubEventSource {
 }
 
 Object.assign(globalThis, { EventSource: StubEventSource });
+afterEach(() => {
+  cleanup();
+  globalThis.fetch = originalFetch;
+  globalThis.EventSource = originalEventSource;
+});
 
-afterEach(() => cleanup());
+function registerHappyDom(): void {
+  try {
+    GlobalRegistrator.register();
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("already been globally registered")) throw error;
+  }
+}
 
 function workspace(): WorkspaceView {
   const card: Card = {

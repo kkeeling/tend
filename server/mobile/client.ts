@@ -7,6 +7,7 @@ import type {
   MobileCommandState,
   MobileWorkspaceSnapshot,
 } from "../../shared/mobile";
+import { isRecord } from "../util";
 
 export interface MobileCloudConfig {
   url: string;
@@ -16,14 +17,15 @@ export interface MobileCloudConfig {
 }
 
 export interface MobileCloudClient {
-  replaceSnapshot(snapshot: MobileWorkspaceSnapshot): Promise<void>;
-  claimCommands(limit?: number): Promise<MobileCommand[]>;
+  replaceSnapshot(snapshot: MobileWorkspaceSnapshot, signal?: AbortSignal): Promise<void>;
+  claimCommands(limit?: number, signal?: AbortSignal): Promise<MobileCommand[]>;
   completeCommand(
     commandId: string,
     state: Extract<MobileCommandState, "applied" | "rejected">,
     result: { workId?: string; error?: string },
+    signal?: AbortSignal,
   ): Promise<void>;
-  syncCommandProgress(progress: MobileCommandProgress[]): Promise<void>;
+  syncCommandProgress(progress: MobileCommandProgress[], signal?: AbortSignal): Promise<void>;
 }
 
 const mobileEnvKeys = [
@@ -88,20 +90,20 @@ export function mobileCloudConfigFromEnv(env: NodeJS.ProcessEnv = process.env): 
 export class SupabaseMobileCloudClient implements MobileCloudClient {
   constructor(private readonly config: MobileCloudConfig) {}
 
-  async replaceSnapshot(snapshot: MobileWorkspaceSnapshot): Promise<void> {
+  async replaceSnapshot(snapshot: MobileWorkspaceSnapshot, signal?: AbortSignal): Promise<void> {
     await this.rpc("replace_mobile_snapshot", {
       p_user_id: this.config.userId,
       p_worker_id: this.config.workerId,
       p_snapshot: snapshot,
-    });
+    }, signal);
   }
 
-  async claimCommands(limit = 20): Promise<MobileCommand[]> {
+  async claimCommands(limit = 20, signal?: AbortSignal): Promise<MobileCommand[]> {
     const rows = await this.rpc<Record<string, unknown>[]>("claim_mobile_commands", {
       p_user_id: this.config.userId,
       p_worker_id: this.config.workerId,
       p_limit: limit,
-    });
+    }, signal);
     return rows.map(normalizeMobileCommand);
   }
 
@@ -109,6 +111,7 @@ export class SupabaseMobileCloudClient implements MobileCloudClient {
     commandId: string,
     state: "applied" | "rejected",
     result: { workId?: string; error?: string },
+    signal?: AbortSignal,
   ): Promise<void> {
     await this.rpc("complete_mobile_command", {
       p_command_id: commandId,
@@ -116,19 +119,22 @@ export class SupabaseMobileCloudClient implements MobileCloudClient {
       p_state: state,
       p_work_id: result.workId ?? null,
       p_error: result.error ?? null,
-    });
+    }, signal);
   }
 
-  async syncCommandProgress(progress: MobileCommandProgress[]): Promise<void> {
+  async syncCommandProgress(progress: MobileCommandProgress[], signal?: AbortSignal): Promise<void> {
     if (!progress.length) return;
     await this.rpc("sync_mobile_command_progress", {
       p_user_id: this.config.userId,
       p_worker_id: this.config.workerId,
       p_progress: progress,
-    });
+    }, signal);
   }
 
-  private async rpc<T = unknown>(name: string, payload: unknown): Promise<T> {
+  private async rpc<T = unknown>(name: string, payload: unknown, signal?: AbortSignal): Promise<T> {
+    const requestSignal = signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
+      : AbortSignal.timeout(15_000);
     const response = await fetch(`${this.config.url}/rest/v1/rpc/${name}`, {
       method: "POST",
       headers: {
@@ -137,7 +143,7 @@ export class SupabaseMobileCloudClient implements MobileCloudClient {
         "content-type": "application/json",
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15_000),
+      signal: requestSignal,
     });
     const text = await response.text();
     if (!response.ok) {
@@ -183,10 +189,6 @@ function requiredString(value: unknown, label: string): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function requiredStringRecord(value: unknown): Record<string, string> {

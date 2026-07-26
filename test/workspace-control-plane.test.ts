@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -53,5 +53,51 @@ describe("workspace control plane parity", () => {
     expect(bytes).not.toContain("capabilityToken");
     expect((await store.readWorkItems("side-project"))).toHaveLength(1);
     expect((await store.readWorkItems("primary-work"))).toHaveLength(0);
+  });
+
+  test("workspace slice GETs are pure and do not rebuild the full control plane", async () => {
+    const { app, domain, store } = await setup();
+    const canonical = await store.readWorkspaceControlPlane(new Date("2026-07-21T18:00:00.000Z"));
+    const refreshSpy = spyOn(domain, "refreshWorkspacePriorities").mockImplementation(async () => {
+      throw new Error("read route attempted a priority mutation");
+    });
+    const nowSpy = spyOn(store, "readWorkspaceNow").mockImplementation(async () => canonical.now);
+    const controlPlaneSpy = spyOn(store, "readWorkspaceControlPlane").mockImplementation(async () => {
+      throw new Error("slice route rebuilt the full aggregate");
+    });
+
+    const response = await app.request("/api/workspace/now", {
+      headers: { "x-attention-read-token": "test-token" },
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json() as { items: unknown[] }).items).toHaveLength(2);
+    expect(nowSpy).toHaveBeenCalledTimes(1);
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(controlPlaneSpy).not.toHaveBeenCalled();
+  });
+
+  test("Now surface returns attention and coverage from one shared coverage scan", async () => {
+    const { app, store } = await setup();
+    const canonical = await store.readWorkspaceControlPlane(new Date("2026-07-21T18:00:00.000Z"));
+    const surfaceSpy = spyOn(store, "readWorkspaceNowSurface").mockImplementation(async () => {
+      return { now: canonical.now, coverage: canonical.coverage };
+    });
+    const nowSpy = spyOn(store, "readWorkspaceNow").mockImplementation(async () => {
+      throw new Error("Now surface performed a second attention read");
+    });
+    const coverageSpy = spyOn(store, "readWorkspaceCoverage").mockImplementation(async () => {
+      throw new Error("Now surface performed a second coverage scan");
+    });
+
+    const response = await app.request("/api/workspace/now-surface", {
+      headers: { "x-attention-read-token": "test-token" },
+    });
+    expect(response.status).toBe(200);
+    const surface = await response.json() as { now: { items: unknown[] }; coverage: { sources: unknown[] } };
+    expect(surface.now.items).toHaveLength(2);
+    expect(surface.coverage.sources).toHaveLength(canonical.coverage.sources.length);
+    expect(surfaceSpy).toHaveBeenCalledTimes(1);
+    expect(nowSpy).not.toHaveBeenCalled();
+    expect(coverageSpy).not.toHaveBeenCalled();
   });
 });

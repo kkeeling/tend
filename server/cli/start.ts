@@ -3,14 +3,13 @@ import path from "node:path";
 import { attentionDataDir } from "../paths";
 import { versionInfo } from "../version";
 import { startBackgroundCommand } from "./service";
-import { apiUrl, initRuntime, print } from "./shared";
+import { apiUrl, print } from "./shared";
 
 export async function startCommand(args: string[] = []): Promise<void> {
   if (!args.includes("--foreground")) {
     await startBackgroundCommand();
     return;
   }
-  await initRuntime();
   process.env.ATTENTION_CLIENT_DIR ??= defaultClientDir();
   const version = versionInfo();
   print(`Tend starting

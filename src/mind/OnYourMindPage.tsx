@@ -3,7 +3,7 @@ import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
 import type { MindContextHealth, MindContextObservation, MindContextSignal, MindContextSignalKind, MindContextUpdate, MindContextWorkspace, WorkspaceView } from "../../shared/types";
 import { api } from "../app/api";
-import { RealtimeProvider } from "../state/realtime";
+import { RealtimeProvider, useRefreshCoalescer } from "../state/realtime";
 import { TopBar } from "../shell/TopBar";
 import { DetachedLink } from "../ui/DetachedLink";
 import { FormattedText } from "../ui/FormattedText";
@@ -45,6 +45,29 @@ function FocusMark() {
       <circle cx="12" cy="12" r="4" />
       <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
     </svg>
+  );
+}
+
+export function MindRefreshStatus({
+  error,
+  busy,
+  onRetry,
+}: {
+  error?: unknown;
+  busy: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="control-safety-banner" role={error ? "alert" : "status"} aria-live="polite">
+      <span>
+        {error
+          ? `Showing last-known context because refresh failed: ${error instanceof Error ? error.message : String(error)}`
+          : "Showing last-known context while Tend reconnects."}
+      </span>
+      <button className="button ghost" disabled={busy} onClick={onRetry}>
+        {busy ? "Refreshing…" : "Retry"}
+      </button>
+    </div>
   );
 }
 
@@ -117,7 +140,15 @@ function SignalSection({
   );
 }
 
-export function OnYourMindContent({ workspace, historical = false }: { workspace: MindContextWorkspace; historical?: boolean }) {
+export function OnYourMindContent({
+  workspace,
+  historical = false,
+  busy = false,
+}: {
+  workspace: MindContextWorkspace;
+  historical?: boolean;
+  busy?: boolean;
+}) {
   const selected = workspace.current;
   const current = selected?.state === "fresh" ? selected : null;
   const historicalHealth = historical && selected?.state !== "fresh" ? selected : null;
@@ -125,7 +156,7 @@ export function OnYourMindContent({ workspace, historical = false }: { workspace
   const sourceCount = current?.observations?.length ?? 0;
 
   return (
-    <main className="mind-page">
+    <main className="mind-page" aria-busy={busy}>
       <header className="mind-hero">
         <div className="mind-kicker">
           <span className={`mind-health ${historical ? "mind-health-historical" : `mind-health-${workspace.health}`}`}>
@@ -226,23 +257,30 @@ export function OnYourMindPage() {
   const locationHash = useLocation({ select: (location) => location.hash });
   const workspaceQuery = useQuery({
     queryKey: ["workspace", "mind-navigation"],
-    queryFn: () => api<WorkspaceView>("/api/state?feed=inbox"),
+    queryFn: ({ signal }) => api<WorkspaceView>("/api/state?feed=inbox", { signal }),
   });
   const mindQuery = useQuery({
     queryKey: ["mind-context"],
-    queryFn: () => api<MindContextWorkspace>("/api/mind-context/current"),
+    queryFn: ({ signal }) => api<MindContextWorkspace>("/api/mind-context/current", { signal }),
   });
   const selectedUpdateQuery = useQuery({
     queryKey: ["mind-context", "update", updateId],
-    queryFn: () => api<MindContextUpdate>(`/api/mind-context/${encodeURIComponent(updateId ?? "")}`),
+    queryFn: ({ signal }) => api<MindContextUpdate>(`/api/mind-context/${encodeURIComponent(updateId ?? "")}`, { signal }),
     enabled: Boolean(updateId),
   });
-  const refresh = useCallback(() => {
-    void Promise.all([
+  const refreshQueries = useCallback(async () => {
+    await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["workspace"] }),
       queryClient.invalidateQueries({ queryKey: ["mind-context"] }),
     ]);
   }, [queryClient]);
+  const cancelRefreshQueries = useCallback(async () => {
+    await Promise.all([
+      queryClient.cancelQueries({ queryKey: ["workspace"] }),
+      queryClient.cancelQueries({ queryKey: ["mind-context"] }),
+    ]);
+  }, [queryClient]);
+  const refresh = useRefreshCoalescer(refreshQueries, cancelRefreshQueries);
 
   useEffect(() => {
     const encodedTargetId = (locationHash || window.location.hash).replace(/^#/, "");
@@ -259,44 +297,59 @@ export function OnYourMindPage() {
     };
   }, [locationHash, mindQuery.data, selectedUpdateQuery.data]);
 
-  if (workspaceQuery.isError || mindQuery.isError) {
-    return (
-      <main className="mind-page">
-        <div className="mind-state-message">
-          <h1>On Your Mind could not be loaded.</h1>
-          <p>Feeds continue normally without contextual influence.</p>
-        </div>
-      </main>
-    );
-  }
-
-  if (!workspaceQuery.data || !mindQuery.data || (updateId && selectedUpdateQuery.isPending)) {
-    return <main className="loading">Loading context...</main>;
-  }
-
-  const workspace = updateId && selectedUpdateQuery.data
-    ? { ...mindQuery.data, current: selectedUpdateQuery.data }
-    : mindQuery.data;
-
   return (
     <RealtimeProvider enabled onChange={refresh}>
-      <TopBar
-        state={workspaceQuery.data}
-        title="On Your Mind"
-        destination="mind"
-        onMind={() => void navigate({ to: "/mind" })}
-        onFeed={(feedId) => void navigate({ to: "/feed/$feedId", params: { feedId } })}
-      />
-      {updateId && selectedUpdateQuery.isError
-        ? (
+      {({ state: connectionState }) => {
+        const unavailable = (workspaceQuery.isError && !workspaceQuery.data) || (mindQuery.isError && !mindQuery.data);
+        if (unavailable) {
+          const loadError = workspaceQuery.error ?? mindQuery.error;
+          return (
             <main className="mind-page">
-              <div className="mind-state-message">
-                <h1>That pulse is no longer available.</h1>
-                <p>The card still records that context influenced it, but its detailed source trail could not be loaded.</p>
+              <div className="mind-state-message" role="alert">
+                <h1>On Your Mind could not be loaded.</h1>
+                <p>{loadError instanceof Error ? loadError.message : "Feeds continue normally without contextual influence."}</p>
+                <button className="button ghost" disabled={workspaceQuery.isFetching || mindQuery.isFetching} onClick={() => void refresh()}>Retry</button>
               </div>
             </main>
-          )
-        : <OnYourMindContent workspace={workspace} historical={Boolean(updateId)} />}
+          );
+        }
+        if (!workspaceQuery.data || !mindQuery.data || (updateId && selectedUpdateQuery.isPending)) {
+          return <main className="loading" role="status" aria-live="polite" aria-busy="true">Loading context...</main>;
+        }
+        const workspace = updateId && selectedUpdateQuery.data
+          ? { ...mindQuery.data, current: selectedUpdateQuery.data }
+          : mindQuery.data;
+        const queryError = workspaceQuery.error ?? mindQuery.error ?? (updateId ? selectedUpdateQuery.error : null);
+        const stale = Boolean(queryError) || connectionState !== "live";
+        const busy = workspaceQuery.isFetching || mindQuery.isFetching || selectedUpdateQuery.isFetching;
+        return (
+          <>
+            <TopBar
+              state={workspaceQuery.data}
+              title="On Your Mind"
+              destination="mind"
+              onMind={() => void navigate({ to: "/mind" })}
+              onFeed={(feedId) => void navigate({ to: "/feed/$feedId", params: { feedId } })}
+            />
+            {stale && (
+              <MindRefreshStatus error={queryError} busy={busy} onRetry={() => void refresh()} />
+            )}
+            {updateId && selectedUpdateQuery.isError
+              ? (
+                  <main className="mind-page">
+                    <div className="mind-state-message" role="alert">
+                      <h1>That pulse is no longer available.</h1>
+                      <p>{selectedUpdateQuery.error instanceof Error ? selectedUpdateQuery.error.message : "The card still records that context influenced it, but its detailed source trail could not be loaded."}</p>
+                      <button className="button ghost" disabled={selectedUpdateQuery.isFetching} onClick={() => void selectedUpdateQuery.refetch()}>
+                        {selectedUpdateQuery.isFetching ? "Retrying…" : "Retry pulse"}
+                      </button>
+                    </div>
+                  </main>
+                )
+              : <OnYourMindContent workspace={workspace} historical={Boolean(updateId)} busy={busy} />}
+          </>
+        );
+      }}
     </RealtimeProvider>
   );
 }
