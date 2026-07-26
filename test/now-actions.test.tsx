@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import type { WorkspaceControlPlane } from "../shared/types";
 import { ControlPlaneApp } from "../src/workspace/ControlPlaneApp";
+import { registerHappyDom } from "./happy-dom";
 
 const originalFetch = globalThis.fetch;
 const originalEventSource = globalThis.EventSource;
@@ -33,14 +33,6 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   globalThis.EventSource = originalEventSource;
 });
-
-function registerHappyDom(): void {
-  try {
-    GlobalRegistrator.register();
-  } catch (error) {
-    if (!(error instanceof Error) || !error.message.includes("already been globally registered")) throw error;
-  }
-}
 
 test("Now permits only one in-flight request for a rapidly repeated card action", async () => {
   const surface: Pick<WorkspaceControlPlane, "now" | "coverage"> = {

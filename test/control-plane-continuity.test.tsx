@@ -1,17 +1,13 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import type { Card, WorkspaceControlPlane, WorkspaceNowItem } from "../shared/types";
 import { ControlPlaneApp } from "../src/workspace/ControlPlaneApp";
 import { createWorkspaceContinuityStore } from "../src/workspace/continuityStore";
+import { registerHappyDom } from "./happy-dom";
 
-try {
-  GlobalRegistrator.register();
-} catch (error) {
-  if (!(error instanceof Error) || !error.message.includes("already been globally registered")) throw error;
-}
+registerHappyDom();
 
 const originalFetch = globalThis.fetch;
 const originalEventSource = globalThis.EventSource;

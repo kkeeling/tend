@@ -1,13 +1,9 @@
 import { expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { RealtimeProvider } from "../src/state/realtime";
+import { registerHappyDom } from "./happy-dom";
 
-try {
-  GlobalRegistrator.register();
-} catch (error) {
-  if (!(error instanceof Error) || !error.message.includes("already been globally registered")) throw error;
-}
+registerHappyDom();
 
 class ControlledEventSource {
   static current: ControlledEventSource | null = null;

@@ -1,10 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import App from "../src/App";
 import type { Card, FeedView, WorkspaceView } from "../shared/types";
+import { registerHappyDom } from "./happy-dom";
 
 const originalFetch = globalThis.fetch;
 const originalEventSource = globalThis.EventSource;
@@ -22,14 +22,6 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   globalThis.EventSource = originalEventSource;
 });
-
-function registerHappyDom(): void {
-  try {
-    GlobalRegistrator.register();
-  } catch (error) {
-    if (!(error instanceof Error) || !error.message.includes("already been globally registered")) throw error;
-  }
-}
 
 function workspace(): WorkspaceView {
   const card: Card = {

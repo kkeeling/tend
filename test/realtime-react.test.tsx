@@ -1,15 +1,11 @@
 import { expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { useRefreshCoalescer } from "../src/state/realtime";
+import { registerHappyDom } from "./happy-dom";
 
 const originalFetch = globalThis.fetch;
 const originalEventSource = globalThis.EventSource;
-try {
-  GlobalRegistrator.register();
-} catch (error) {
-  if (!(error instanceof Error) || !error.message.includes("already been globally registered")) throw error;
-}
+registerHappyDom();
 
 test("ordinary rerenders preserve an active refresh and use the latest callback for the trailing pass", async () => {
   const calls: number[] = [];
