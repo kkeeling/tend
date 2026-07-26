@@ -29,6 +29,7 @@ const dataDir = resolveDataDir(root);
 const mutationToken = process.env.ATTENTION_MUTATION_TOKEN ?? makeToken();
 const realtime = createRealtimeHub();
 let releaseRuntimeReplacementLock: (() => Promise<void>) | null = null;
+let pendingRuntimeReplacementLock: Promise<() => Promise<void>> | null = null;
 let fetchHandler: (...args: any[]) => any = (request: Request) => startupResponse(request);
 let server: ReturnType<typeof Bun.serve> | null = null;
 let sqlite: Awaited<ReturnType<typeof openOrBootstrapLocalRuntime>>["sqlite"] | null = null;
@@ -39,8 +40,13 @@ let mobileSync: MobileSyncWorker | null = null;
 let closePromise: Promise<void> | null = null;
 
 async function releaseReplacementLock(): Promise<void> {
-  const release = releaseRuntimeReplacementLock;
+  let release = releaseRuntimeReplacementLock;
   releaseRuntimeReplacementLock = null;
+  if (!release && pendingRuntimeReplacementLock) {
+    const pending = pendingRuntimeReplacementLock;
+    pendingRuntimeReplacementLock = null;
+    release = await pending;
+  }
   await release?.();
 }
 
@@ -94,7 +100,14 @@ try {
 }
 
 try {
-  releaseRuntimeReplacementLock = await acquireRuntimeReplacementLock(runtimeRoot);
+  const pendingReplacementLock = acquireRuntimeReplacementLock(runtimeRoot);
+  pendingRuntimeReplacementLock = pendingReplacementLock;
+  const acquiredReplacementLock = await pendingReplacementLock;
+  if (pendingRuntimeReplacementLock !== pendingReplacementLock) {
+    throw new Error("Tend shutdown interrupted runtime replacement-lock acquisition.");
+  }
+  pendingRuntimeReplacementLock = null;
+  releaseRuntimeReplacementLock = acquiredReplacementLock;
   const runtime = await openOrBootstrapLocalRuntime(dataDir, resolveDbPath(root));
   sqlite = runtime.sqlite;
   const { store } = runtime;
